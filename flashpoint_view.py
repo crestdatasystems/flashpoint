@@ -48,5 +48,17 @@ def display_view(provides, all_app_runs, context):
     if provides in ["list reports", "get report", "list related reports"]:
         return "flashpoint_reports_view.html"
 
+    if provides == "list sightings":
+        return "flashpoint_sightings_view.html"
+
+    if provides == "get sighting":
+        return "flashpoint_sighting_view.html"
+
+    if provides == "get indicator":
+        return "flashpoint_indicator_view.html"
+
+    if provides == "list alerts":
+        return "flashpoint_alerts_view.html"
+
     if provides in ["list indicators", "search indicators"]:
         return "flashpoint_iocs_view.html"

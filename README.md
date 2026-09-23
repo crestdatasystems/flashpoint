@@ -1,7 +1,7 @@
 # Flashpoint
 
 Publisher: Flashpoint <br>
-Connector Version: 3.0.3 <br>
+Connector Version: 4.0.0 <br>
 Product Vendor: Flashpoint <br>
 Product Name: Flashpoint <br>
 Minimum Product Version: 6.2.1
@@ -15,23 +15,111 @@ application. Below are the explanation and usage of all those parameters.
 
 - **Base URL -** The URL to connect to the Flashpoint server.
 - **API Token -** The API token of the user.
-- **Retry Wait Period (in seconds) -** The value of this parameter defines the waiting period in
-  seconds for which to hold the current execution of the action on receiving the “500 Internal
-  Server Error” and then, retry the same API call after the waiting period is exhausted. This
-  ensures that the integration provides a mechanism of attempting to overcome the intermittent
-  “500 Internal Server Error”. It allows only non-zero positive integer values as input. The
-  default value is 5 seconds.
-- **Number Of Retries -** The value of this parameter defines the number of attempts for which the
-  action will keep on retrying if the Flashpoint API continuously returns the “500 Internal Server
-  Error”. If the intermittent error gets eliminated before the number of retries gets exhausted,
-  then, the action execution will continue along its workflow with the next set of API calls and
-  if the intermittent error is still persistent and all the number of retries are exhausted, then,
-  the action will fail with the latest error message being displayed. It allows only zero or
+- **Request Timeout(in seconds) -** Bounds every API call, so a hung endpoint fails the action
+  instead of blocking it until the platform intervenes. It allows only non-zero positive integer
+  values as input. The default value is 120 seconds, which leaves headroom for the slower calls
+  of this API, such as 'list reports' with a large limit. The retry mechanism applies per call,
+  so each API call of a paginated action gets the configured number of retries.
+- **Retry Wait Period (in seconds) -** The waiting period held before the same API call is
+  attempted again after a transient response. The statuses treated as transient are
+  `429 Too Many Requests`, `500`, `502`, `503` and `504`; every other status is a result the
+  analyst has to act on and is reported without a retry. It allows only non-zero positive integer
+  values as input. The default value is 5 seconds.
+  - A `429` carries the wait the API asks for in its `Retry-After` header, as a number of seconds
+    or as an HTTP date. That value is used in place of this setting when it is present and
+    usable, capped at 60 seconds so an action cannot be held open for minutes; the poll or action
+    fails instead and the next run picks the work up. A malformed, zero or already-elapsed header
+    falls back to this setting.
+- **Number Of Retries -** The number of further attempts made while the API keeps answering with
+  one of the transient statuses above. If the condition clears before the retries are exhausted
+  the action continues along its workflow with the next set of API calls; if all retries are
+  exhausted the action fails with the latest error message being displayed. It allows only zero or
   positive integer values as input. The default value is 1 retry.
 - **Session Timeout -** This is an optional asset configuration parameter. The value of this
   parameter will be used as the session timeout value in the ‘Get Compromised Credentials’ and
   ‘Run Query’ actions while using the session scrolling pagination. The default value is 2 minutes
   and the maximum allowed value is 60 minutes.
+
+### On Poll (ingestion) asset configuration parameters
+
+These parameters only affect the [on poll] action. Splunk SOAR permits one ingestion action per
+app, so ingesting both alerts and compromised credentials requires **two asset configurations**.
+
+- **Ingestion Type -** Selects the data source of the [on poll] action: `Compromised Credentials`
+  (default) or `Alerts`. Settings that do not apply to the selected type are ignored.
+- **First Run Window(in days) -** The backfill window used when the asset has no saved checkpoint
+  yet. It allows only non-zero positive integer values as input. The default value is 3 days.
+- **Maximum Events Per Poll -** The maximum number of containers created by one scheduled poll. A
+  manual `POLL NOW` uses the container count supplied by the platform instead. It allows only
+  non-zero positive integer values as input. The default value is 100. This is a rate limit, not a
+  filter: a poll that cannot finish its window keeps the window and resumes from the position it
+  reached, so a backlog drains over consecutive polls and no record is skipped. The action message
+  and `action_result.summary` report a window that is not finished. Raise this setting to drain a
+  large first-run backfill in fewer polls.
+- **Container label -** Set a label under Ingest Settings. Splunk SOAR only accepts a container
+  label that already exists on the platform, so ingestion fails with a message asking for one
+  rather than falling back to a label of its own.
+- **Event Severity -** The severity applied to every ingested container: `low`, `medium` (default)
+  or `high`. The alert payload carries no severity field, so the severity comes from this setting.
+- **Alerts: standing source filter -** Applied to every alerts poll, with the same accepted values
+  as the 'Sources' parameter of [list alerts], as a comma-separated list.
+- **Alerts: standing status filter -** Applied to every alerts poll, with the same accepted values
+  as the 'Status' parameter of [list alerts]. The endpoint accepts a single status only: a
+  comma-separated value is answered with HTTP 422, so the poll rejects it naming the asset
+  configuration rather than sending it. `All` (default) polls without the filter.
+- **Alerts: standing origin filter -** Applied to every alerts poll, with the same accepted values
+  as the 'Origin' parameter of [list alerts] (`searches`, `assets`, `analyst-team`,
+  `vuln-alerting`). Single-valued for the same reason as the status filter. `All` (default) polls
+  without the filter. Splunk SOAR keeps the last value a dropdown was given and offers no way back
+  to an empty one, so `All` is how either filter is removed after it has been configured.
+  Changing either filter while a window is still being drained applies it to the remainder of that
+  window: the saved cursor was produced under the previous filter, so the records it already
+  stepped past are not revisited.
+- **Compromised Credentials: Filter -** A standing query filter applied to every poll, written in
+  the same syntax as the 'Filter' parameter of the [get compromised credentials] action and
+  documented with the same sample values. The connector appends it to the query it builds, so it
+  combines with the `+basetypes:credential-sighting` term and the ingestion window; it cannot
+  remove either of them. It is optional and unset by default, which ingests every credential
+  sighting the tenant's collection returns for the window.
+  - Each clause carries its own `+` (required) or `-` (excluded) prefix. A clause with no prefix
+    is optional to the search endpoint, which widens the poll instead of narrowing it.
+  - Domain matching uses the exact `.keyword` sub-field. `+domain:acme.com` matches the analyzed
+    field and returns other domains; `+domain.keyword:acme.com` does not.
+  - The exact match covers one domain only, and wildcards are rejected by the endpoint, so every
+    sending sub-domain is listed in a group: `+domain.keyword:(acme.com OR mail.acme.com)`.
+  - `domain` is the email domain of the compromised account, i.e. your own users;
+    `affected_domain` is the site the credential was used on.
+  - **Examples:**
+    - `+domain.keyword:(acme.com OR mail.acme.com)` - credentials of your own users
+    - `+domain.keyword:acme.com -domain.keyword:test.acme.com` - the same, minus a sub-domain
+    - `+affected_domain.keyword:shop.acme.com` - accounts breached on your own property
+    - `+breach.fpid:nIbeDs_VXyKedBmuhFEaGQ` - one named breach
+    - `+password_complexity.has_symbol:true +password_complexity.length:[12 TO *]` - password
+      complexity, which the search endpoint exposes as query clauses rather than parameters
+  - Changing this setting while a window is still being drained restarts the walk of that window
+    from the position it had reached, which was measured against the previous filter. Clear the
+    asset's ingestion state, or wait for the action message to stop reporting an unfinished
+    window, before changing it.
+- **Compromised Credentials: fresh credentials only -** Restricts the poll to records marked
+  `is_fresh`, meaning the username/password pair was not seen in an earlier breach. It defaults to
+  **true**, and should stay on for unattended ingestion. A credential sighting is one appearance of
+  a credential in one collected dump, so the unfiltered stream is dominated by re-sightings of
+  pairs already known. Clearing this setting is for a one-off historical backfill, not for a
+  schedule.
+- **Compromised Credentials: meets pw complexity -** The same server-side Ignite CCM-E filter as
+  the [get compromised credentials] action parameter. It defaults to false.
+- **Compromised Credentials: store plaintext password -** Whether the breached password is written
+  into the ingested container and artifact. It defaults to **false**, which is the safe default:
+  the connector then removes `password` from the record before saving, so it appears neither in
+  the `password` CEF field nor in `container.data` / `artifact.data`. Everything else about the
+  sighting is ingested unchanged, including the `flashpointPasswordComplexity*` fields and
+  `flashpointPasswordHashAlgorithms`, which describe the password without disclosing it.
+  - Turn it on only if a playbook needs the credential itself, for example to compare it against
+    the directory and force a reset on a match. A CEF field is indexed and searchable across the
+    platform, so with the setting on every plaintext password is queryable by anyone who can read
+    the container. Pair it with a container label restricted to the roles allowed to see it.
+  - The setting applies at ingestion time. Containers created while it was on keep the password
+    until they are deleted; turning it off stops new ones from carrying it.
 
 ## Steps to generate API Token
 
@@ -51,119 +139,318 @@ retrieve this key after leaving this page.
 ## Explanation of Flashpoint Actions' Parameters
 
 1. ### Test Connectivity (Action Workflow Details)
-   - This action will test the connectivity of the Phantom server to the Flashpoint instance by
-     making an initial API call to the Indicators API using the provided asset configuration
-     parameters.
+   - This action will test the connectivity of the Splunk SOAR server to the Flashpoint instance by
+     making an initial API call to the Technical Intelligence v2 indicators endpoint using the
+     provided asset configuration parameters.
    - The action validates the provided asset configuration parameters. Based on the API call
      response, the appropriate success and failure message will be displayed when the action gets
      executed.
 1. ### List Indicators
-   - **<u>Action Parameter</u> ​ - Attribute Types**
+   - This action fetches IoCs from the Technical Intelligence v2 indicators endpoint
+     (`GET /technical-intelligence/v2/indicators`). All of its parameters are optional and every
+     provided filter narrows the result set.
 
-     - This parameter enables search by attribute types. It is an optional action parameter. It
-       supports the comma-separated list of attribute types values. Each value from the
-       provided comma-separated list must correspond to one of the MISP types, a list of which
-       can be found [here](https://www.circl.lu/doc/misp/categories-and-types/#types) .
+   - **<u>Action Parameter</u> - IoC Value**
+
+     - Plain-text value matched against the IoC values. A value wrapped in double quotes is
+       matched exactly, an unquoted value is matched partially.
      - **Examples:**
-       - Get recent md5, sha1, or source IP indicators
-         - Attribute Types = md5,sha1,ip-src
+       - Partial match on every IoC value containing the domain
+         - IoC Value = example.com
+       - Exact match on a single IP address
+         - IoC Value = "198.51.100.24"
 
-   - **<u>Action Parameter</u> ​ - Query**
+   - **<u>Action Parameter</u> - IoC Types**
 
-     - This parameter will be used for free text searching. It is an optional parameter. You
-       can also provide different queries to filter out indicators results.
+     - Comma-separated list of IoC types to match. The allowed values are `domain`,
+       `extracted_config`, `file`, `ipv4`, `ipv6` and `url`. Any other value fails the action
+       before an API call is made.
      - **Examples:**
-       - Filtering results based on the field value
-         - Query = category:”Payload Delivery”
-       - Free text search(when using multiple words, use a + instead of space, and for
-         specific word search use “test text” (inverted double quotes) in the query action
-         parameter.)
-         - Query = gandcrab+ransomware
-         - Query = “test text”
+       - Fetch file and domain IoCs
+         - IoC Types = file,domain
 
-   - **<u>Action Parameter</u> - Limit**
+   - **<u>Action Parameter</u> - Size and From**
 
-     - This parameter is used to limit the number of indicator results. The default value
-       is 500. If the limit is not provided, it will fetch by default 500 indicator results.
+     - The API pages results by offset. 'Size' is the maximum number of IoCs fetched in one
+       request (default 10) and 'From' is the zero-based index of the first IoC (default 0). A
+       request returns at most 1000 IoCs, or at most 500 when the 'Embed' parameter is provided;
+       a larger 'Size' is reduced by the connector and the reduction is reported in the action
+       message. Fetch further IoCs by re-running the action with 'From' advanced by 'Size'.
 
-   - **<u>Notes</u> -** The user will have to provide URL value in the "Attribute Types" action
-     parameter and the URL value enclosed in double-quotes in the "Query" parameter if they want
-     to search for an IoC having a specific URL value. This does not work correctly if the user
-     provides the URL value without double-quotes in the "Query" parameter. This is based on the
-     current API behavior of the Flashpoint.
+   - **<u>Action Parameter</u> - CIDR Range**
+
+     - CIDR range matched against the `ipv4` and `ipv6` IoC values.
+     - **Examples:**
+       - CIDR Range = 198.51.100.0/24
+
+   - **<u>Action Parameter</u> - Tags, Sources, Actors, Malware and MITRE ATT&CK IDs**
+
+     - Comma-separated lists of exact tag matches. 'Tags' accepts any `{prefix}:{suffix}` tag,
+       for example `malware:asprox`, `actor:ta505`, `os:windows`, `asn:12345`, `origin:china` or
+       `report:004W2YABmBdJgq5I9VMh`. 'Sources', 'Actors' and 'Malware' filter on the
+       corresponding tag families and their tag prefix is optional. 'MITRE ATT&CK IDs' accepts
+       technique IDs such as `T1041`.
+     - The source names are `flashpoint_extraction`, `flashpoint_detection`,
+       `flashpoint_apt`, `flashpoint_infected_hosts`, `flashpoint_analyst`, `flashpoint_collab`
+       and `external_intelligence`.
+     - **Examples:**
+       - Fetch every IoC tagged with either malware family
+         - Malware = asprox,metastealer
+
+   - **<u>Action Parameter</u> - Min Score and Max Score**
+
+     - Score tier bounds of the fetched IoCs. The tiers are `informational`, `suspicious` and
+       `malicious`.
+
+   - **<u>Action Parameter</u> - Has Intel Report and Has Extracted Config**
+
+     - Fetch only the IoCs that have an associated intelligence report, respectively an
+       associated extracted configuration. Both default to false and are sent to the API only
+       when enabled.
+
+   - **<u>Action Parameter</u> - Embed**
+
+     - Comma-separated list of additional fields to embed in the response. The allowed values
+       are `all`, `apt_description`, `external_references`, `malware_description`,
+       `mitre_attack_ids` and `related_iocs`. Providing this parameter caps the response at 500
+       IoCs.
+
+   - **<u>Action Parameter</u> - Date Filters**
+
+     - 'Last Seen After', 'Last Seen Before', 'Created After', 'Created Before', 'Modified
+       After' and 'Modified Before' accept an absolute datetime (`2024-02-09T02:01:02Z`), a date
+       (`2024-02-09`) or a relative value (`-30d`, `-8h`, `+1w`). The case matters in relative
+       values: `M` is months and `m` is minutes.
+
+   - **<u>Action Parameter</u> - Sort**
+
+     - Date field and direction used to sort the fetched IoCs. The default is
+       `last_seen_at:desc`.
+
+   - **<u>Action Parameter</u> - Include Total Count**
+
+     - Fetches the exact number of IoCs matching the query into
+       `action_result.summary.total_count`. This increases the API response time on large result
+       sets, so it defaults to false.
+
+   - **<u>Notes</u> -**
+
+     - Different parameters are combined by the API using AND logic, while the values within one
+       comma-separated parameter are combined using OR logic.
+     - **Unless one of the date filters is provided, the API only searches the IoCs with a
+       `last_seen_at` date within the last 30 days.** Provide 'Last Seen After' to search
+       further back.
 1. ### Search Indicators
-   - **<u>Action Parameter</u> ​ - Attribute Type and Attribute Value**
+   - This action fetches the IoCs matching a single IoC value from the Technical Intelligence v2
+     indicators endpoint (`GET /technical-intelligence/v2/indicators`). It is the same endpoint
+     as [list indicators] with a deliberately narrower filter set.
 
-     - These parameters are required parameters. They will be used to retrieve specific
-       indicator results based on the provided values.
+   - **<u>Action Parameter</u> - IoC Value**
+
+     - This is the only required parameter. A value wrapped in double quotes is matched exactly,
+       an unquoted value is matched partially.
      - **Examples:**
-       - Get indicator matching a specific hash value
+       - Search for a file by its hash
+         - IoC Value = "aedf215a803599bb3858947f23aaa6cf5b01a4d6cf2d16704a6ff0ff1a9611ad" <!-- pragma: allowlist secret -->
+       - Search for every IoC value containing a URL
+         - IoC Value = http://ww1.example.com/?subid1=bf5b0786-272c-11e9-b8c7-e15edf920d61
 
-         - Attribute Type = md5 (any of md5,sha1,sha256, etc.)
-         - Attribute Value= 16139ce9025274a388a4281fef65049e
+   - **<u>Action Parameter</u> - IoC Types**
 
-       - Get indicator matching a specific filename
+     - Comma-separated list of IoC types to match. It is optional, so omitting it searches every
+       IoC type. The allowed values are `domain`, `extracted_config`, `file`, `ipv4`, `ipv6` and
+       `url`.
 
-         - Attribute Type = filename
-         - Attribute Value= "PLEASE-CHECK”
+   - **<u>Action Parameter</u> - Other Filters**
 
-         <u>Note</u> - In the above example, without the double quotes around the filename,
-         it will search for every filename that matches 'PLEASE'. The hyphen/space will be
-         considered as the end of the search value and it will search for indicators matching
-         the value until the first encountered hyphen/space.
+     - 'Size', 'From', 'CIDR Range', 'Sources', 'Min Score', 'Max Score', 'Last Seen After',
+       'Last Seen Before', 'Embed' and 'Sort' behave exactly as documented for
+       [list indicators], including the 1000 and 500 record caps and the default 30-day
+       `last_seen_at` window.
 
-       - Get indicator matching a specific source IP Address
+   - **<u>Notes</u> -** Hashes of every type are fetched through the `file` IoC type. The
+     `hashes.md5`, `hashes.sha1` and `hashes.sha256` output datapaths carry the individual
+     hashes, while `value` carries the SHA-256 hash for file IoCs.
+1. ### Get Indicator
+   - This action fetches the full detail of one IoC from the Technical Intelligence v2 indicator
+     endpoint (`GET /technical-intelligence/v2/indicators/{id}`). It returns the richest indicator
+     payload of the app: the score block, the embedded sightings and the hash fields.
 
-         - Attribute Type = ip-src
-         - Attribute Value = 111.255.198.92
+   - **<u>Action Parameter</u> - Indicator ID**
 
-       - Get indicator matching a specific URL value
+     - This is a required parameter. It is the Flashpoint indicator ID (FPID), which the
+       [list indicators] and [search indicators] actions return in the `id` output datapath. It
+       carries the `flashpoint indicator id` contains, so those results pivot straight into this
+       action. The value is validated and percent-encoded before it is used as a URL path
+       component, so an ID containing a path separator fails the action before any API call is
+       made.
+     - **Examples:**
+       - Indicator ID = jMXpz9FQXMyPM420kglTAg
 
-         - Attribute Type = url
-         - Attribute Value=
-           http://ww1.gadmobs.com/?subid1=bf5b0786-272c-11e9-b8c7-e15edf920d61
+   - **<u>Action Parameter</u> - Sighting Count**
 
-         <u>Note</u> - Internally, this URL value passed within the inverted comma(for ad-hoc
-         fixation) in the request parameters. Because without the inverted comma, the server
-         responded with the Internal Server Error unnecessarily.
+     - Maximum number of most recent sightings returned with the IoC. It is an optional parameter,
+       the default value is 100 and the allowed range is 1 to 1000.
 
-   - **<u>Action Parameter</u> ​ - Limit**
+   - **<u>Notes</u> -** This endpoint exposes no `embed` parameter; 'Sighting Count' is its only
+     query parameter. An unknown ID fails the action with an "Indicator not found" message.
+1. ### List Sightings
+   - This action fetches sightings, which are the logical groupings of IoCs observed together at a
+     point in time. It calls `GET /technical-intelligence/v2/sightings` and mirrors that endpoint
+     exactly: the sightings list endpoint has no indicator filter, so neither does this action.
+     The sightings of one IoC are returned by [get indicator], whose 'Sighting Count' parameter
+     embeds them in the indicator record.
 
-     - This parameter is used to limit the number of indicator results. The default value
-       is 500. If the limit is not provided, it will fetch by default 500 indicator results.
+   - **<u>Action Parameter</u> - Size and From**
 
-   - **<u>Notes</u> -** This action is not working with the valid value of IoC type which
-     consists of pipe symbol(|) in its name. In case of searching the IoC of that type, you can
-     use [run query] or [list indicators] actions by providing an appropriate query in the
-     "Query" action parameter. Below are the examples:
+     - 'Size' is the maximum number of sightings fetched in one request (default 10). The maximum
+       is 1000, or 500 when 'Embed' is provided; a larger value is reduced by the connector and
+       the reduction is reported in the action message. 'From' is the zero-based index of the
+       first sighting (default 0).
 
-     <u>For [run query] action</u> :
+   - **<u>Action Parameter</u> - Tags, Sources, Sort and the date filters**
 
-     Search for IoC value which consists of pipe symbol(|) in the IoC attribute type
+     - 'Tags' and 'Sources' are comma-separated exact matches. 'Sort' accepts `sighted_at`,
+       `modified_at` or `created_at` with `:asc`/`:desc` and defaults to `sighted_at:desc`, as the
+       endpoint documents. 'Sighted After/Before', 'Created After/Before' and 'Modified
+       After/Before' accept the same absolute and relative date forms as [list indicators].
 
-     - <u>Usage</u> :
+   - **<u>Action Parameter</u> - Embed**
 
-     - Query = +basetypes:indicator_attribute +type:"\<ioc_type>" +value.\\\*:\<ioc_value>
+     - Comma-separated list of additional fields to embed. **The sightings embed set is smaller
+       than the indicators one:** the allowed values are `all`, `apt_description`,
+       `malware_description` and `mitre_attack_ids` — there is no `external_references` and no
+       `related_iocs`. Providing this parameter caps the response at 500 sightings.
+1. ### Get Sighting
+   - This action fetches one sighting by ID from the Technical Intelligence v2 sighting endpoint
+     (`GET /technical-intelligence/v2/sightings/{id}`).
 
-     - <u>Example</u> :
+   - **<u>Action Parameter</u> - Sighting ID**
 
-     - Query = +basetypes:indicator_attribute +type:"ip-dst|port" +value.\\\*:5.79.68.110|80
+     - This is the only parameter and it is required. It is the Flashpoint sighting ID, which
+       [list sightings] returns in the `id` output datapath with the `flashpoint sighting id`
+       contains, and it is validated and percent-encoded like the [get indicator] ID.
 
-     <u>For [list indicators] action</u> :
+   - **<u>Notes</u> -** This endpoint exposes no query parameters at all. Its response is identical
+     to a [list sightings] record **with every optional field included**, so
+     `mitre_attack_ids.*`, `malware_description` and `apt_description` are always returned here,
+     whereas [list sightings] only returns them when 'Embed' is used — and using 'Embed' costs the
+     500-record cap.
+1. ### List Alerts
+   - This action fetches alerts from the Flashpoint alert management API
+     (`GET /alert-management/v1/notifications`), the same endpoint the alerts ingestion mode uses.
 
-     Search for IoC value which consists of pipe symbol(|) in the IoC attribute type
+   - **<u>Action Parameter</u> - Size and Cursor**
 
-     - <u>Usage</u> :
+     - This endpoint pages by **cursor, not by offset**. 'Size' is the number of alerts per
+       request (default 25, maximum 5000; a larger value is reduced and the reduction is reported
+       in the action message). One action run fetches one page and reports the cursor of the next page
+       in `action_result.summary.next_cursor`; pass that value back in 'Cursor' to continue the
+       walk. Unattended, complete collection is what the [on poll] alerts mode is for.
 
-     - Attribute Types = \<ioc_type>
+   - **<u>Action Parameter</u> - Status, Origin and Sources**
 
-     - Query = +value.\\\*:\<ioc_value>
+     - 'Status' and 'Origin' accept a single value each and 'Sources' accepts a comma-separated
+       list. The values are lowercase: 'Status' accepts `archived`, `flagged`, `sent`, `deleted`
+       and `none`; 'Origin' accepts `searches`, `assets`, `analyst-team` and `vuln-alerting`;
+       'Sources' accepts `communities`, `credentials`, `iocs`, `marketplaces`, `media`, `reports`,
+       `vulnerabilities`, `data_exposure__github`, `data_exposure__gitlab` and
+       `data_exposure__bitbucket`. The code-repository sources and `media` correspond to the
+       Ignite UI labels Github, Gitlab, Bitbucket and Images. The casing of the provided value
+       does not matter, but an unrecognised value fails the action before any API call is made.
 
-     - <u>Example</u> :
+   - **<u>Action Parameter</u> - Tags, Asset Type, Asset IP, Asset IDs and Query IDs**
 
-     - Attribute Types = ip-dst|port
+     - Optional filters narrowing the alerts to given tags, asset attributes, asset IDs or the
+       saved searches ('Query IDs') that raised them.
 
-     - Query = +value.\\\*:"5.79.68.110|80"
+   - **<u>Action Parameter</u> - Created After and Created Before**
+
+     - Time window of the alert list. Both accept an absolute ISO-8601 UTC datetime
+       (`2026-09-01T00:00:00Z`) or a `now`-anchored relative value (`now`, `now-7d`). The alert
+       endpoint rejects a bare offset such as `-7d`, unlike the Technical Intelligence v2 date
+       filters, so the connector fails that form before the call.
+
+   - **<u>Notes</u> -** An alert carries no title of its own. What an analyst recognises it by is
+     `reason.name` (the saved search or alert rule that fired), while the matched content sits under
+     `resource.*` (`resource.title`, `resource.native_url`, `resource.site.title`,
+     `resource.site_actor.names.handle`) and the matched excerpt in `highlight_text`. The alert
+     timestamps are `generated_at` (when Flashpoint raised it) and `created_at` (when it was
+     recorded).
+1. ### On Poll
+   - This action ingests the data source selected by the 'Ingestion Type' asset configuration
+     parameter into SOAR containers with one artifact per record, and one further artifact per
+     vulnerability of a vulnerability-alert digest.
+   - **Alerts mode** calls `GET /alert-management/v1/notifications` with the standing source,
+     status and origin filters plus a `created_after`/`created_before` window, and pages by cursor.
+     The container name combines the matched content's own title (`resource.title`) and the rule
+     name (`reason.name`) with a short fragment of the alert id, because neither the content title
+     nor the rule name is unique on its own - every reply in the same thread shares
+     `resource.title`, and every alert from the same rule shares `reason.name`. The
+     `source_data_identifier` is the full alert `id`, the container `start_time` is
+     `generated_at`, and the severity comes from the 'Event
+     Severity' setting, because the alert payload carries no severity field. The alert artifact
+     carries:
+     - `flashpointAlertReason`, `flashpointAlertReasonId`, `flashpointAlertReasonOrigin` and
+       `flashpointAlertReasonQuery` - which saved search fired and what it looks for, so a
+       playbook routes or suppresses by rule
+     - `flashpointHighlightText`, the matched text itself, and `requestURL`
+       (`resource.native_url`, falling back to `resource.link` and `resource.ignite_search_url`)
+     - `flashpointSiteTitle` for the platform and `flashpointChannelTitle` /
+       `flashpointChannelId` for the channel, board or thread the content sits in. The platform
+       alone ('Telegram') does not tell an analyst where to look
+     - `sourceUserName` for the actor's handle and `flashpointSiteActorId` for the platform id a
+       rename does not change
+     - `flashpointContentPostedAt`, when the content was posted, as against `generated_at`, when
+       the rule matched it
+     - `flashpointAlertStatus` and `flashpointAlertIsRead`, the Ignite workflow state
+   - **Vulnerability alerts** are digests: one alert carries up to 25 vulnerabilities, each of
+     which is patched, deferred or accepted on its own. Each one therefore gets its own artifact
+     named 'Vulnerability Artifact', identified by `<alert id>:<vuln id>` so a re-poll creates no
+     duplicates, carrying `flashpointVulnId`, `flashpointVulnTitle`, `flashpointVulnCvssV3`,
+     `flashpointVulnEpss`, `flashpointVulnLocation`, `flashpointVulnPublishedAt` and
+     `flashpointVulnUrl` (with the `url` contains). The long `description` and `solution` texts
+     stay in the artifact data rather than in CEF.
+   - **Compromised Credentials mode** calls `GET /sources/v1/noncommunities/search` with the
+     internally built `+basetypes:credential-sighting` query, the watermark window and the
+     standing filter. The container `start_time` is the moment the credential was observed
+     (`breach.first_observed_at`, falling back to `breach.created_at`), not the moment the poll
+     ran. The artifact carries:
+     - `email`, `domain`, `destinationDnsDomain` (`affected_domain`) and `requestURL`
+       (`affected_url`) with the matching contains, so a playbook pivots on them directly
+     - `sourceUserName` (`username`), the account a credential-response playbook matches against
+       the directory and expires. It is mapped separately from `email` because the account name is
+       not always the email address
+     - `flashpointBreachId` (`breach.fpid`), which is the `+breach.fpid:<id>` filter of
+       [get compromised credentials], so one artifact leads to every other victim of the same
+       breach, plus `flashpointBreachTitle`, `flashpointBreachSource`, `flashpointBreachSourceType`
+       and `flashpointBreachType`
+     - `flashpointCredentialRecordId` (`credential_record_fpid`), shared by every sighting of one
+       credential, and `flashpointFirstObservedAt` / `flashpointLastObservedAt`
+     - `flashpointIsFresh`, `flashpointTimesSeen`, `flashpointProbableEnterpriseHost` and the
+       `flashpointPasswordComplexity*` fields
+     - `flashpointPasswordHashAlgorithms`, the algorithms the password value could be a digest of.
+       It is a guess made from the shape of the string and not a statement that the value is
+       hashed: a plaintext password that looks like a digest also carries it
+     - `password` **only when the asset's 'store plaintext password' setting is on**, which it is
+       not by default. With the setting off the password is removed from the record before saving,
+       so neither the CEF field nor the container/artifact data carries it. With it on, the value
+       is searchable across the platform: restrict the container label used by a credentials asset
+       to the roles that are allowed to see it.
+   - **First run:** with no saved checkpoint the action backfills 'First Run Window(in days)'
+     ending at the moment the poll starts.
+   - **Resume:** later scheduled polls start from the saved checkpoint. The checkpoint is written
+     only after the containers of the batch are saved, so an interrupted poll repeats its window
+     rather than skipping it. State is namespaced per ingestion mode, so switching the type on one
+     asset cannot corrupt the other mode's position.
+   - **Deduplication:** every container and artifact carries a stable `source_data_identifier`
+     (the alert `id`, respectively the credential search hit's `_id`), so re-polling the same
+     window creates zero new containers.
+   - **POLL NOW** honours the container count supplied by the platform and does **not** write the
+     checkpoint or consume the saved alert cursor.
+   - **<u>Notes</u> -** The credential search endpoint rejects a request whose `from` + `size`
+     exceeds 10,000. The ingestion walk therefore stops at that ceiling and resumes from the saved
+     watermark on the next poll instead of silently skipping records.
 1. ### List Reports
    - **<u>Action Parameter</u> ​ - Limit**
 
@@ -232,9 +519,12 @@ retrieve this key after leaving this page.
      - **Usage:**
        - For making filter parameter value
 
-         - Query= +basetypes:credential-sighting\<filter>
+         - Query= +basetypes:credential-sighting \<filter>
 
-         Here, the filter is any supported values by the search API endpoint.
+         Here, the filter is any supported values by the search API endpoint. The connector joins
+         it to the fixed `+basetypes:credential-sighting` term with a space, so each clause of the
+         filter should carry its own `+` (required) or `-` (excluded) prefix; a clause with no
+         prefix is optional to the query engine and widens the result set instead of narrowing it.
 
    - **<u>Action Parameter</u> ​ - Limit**
 
@@ -243,6 +533,19 @@ retrieve this key after leaving this page.
        compromised credentials. The internal pagination logic for fetching a large number of
        compromised credentials implements the scrolling session-based Credentials All Search
        APIs.
+
+   - **<u>Action Parameter</u> - Meets Pw Complexity**
+
+     - Filters the credential results for passwords that meet the password complexity rules
+       defined in the Ignite CCM-E settings. It is an optional parameter and defaults to false.
+       The rules are evaluated by the Flashpoint API, the connector performs no local password
+       evaluation. When it is left disabled, the parameter is not sent to the API.
+     - **Examples:**
+       - Fetch only the compromised credentials whose passwords satisfy the tenant's complexity
+         policy
+         - Meets Pw Complexity = true
+       - The individual complexity attributes of every fetched credential remain available in
+         the `_source.password_complexity.*` output datapaths
 1. ### Run Query
    - **<u>Action Parameter</u> ​ - Query**
 
@@ -272,12 +575,12 @@ retrieve this key after leaving this page.
        - Search for credential sightings of the given domain and that are discovered in the
          last month based on the date provided from the source of this credential sightings
          data
-         - Filter =
+         - Query =
            +basetypes:credential-sighting+domain.keyword:domain.com+breach.first_observed_at.date-time:\[now-30d
            TO now\]
        - Search for all search results which are discovered in the last month based on the
          date of indexing of the data into the Flashpoint server
-         - Filter = +header\_.indexed_at:[now-30d TO now]
+         - Query = +header\_.indexed_at:[now-30d TO now]
        - Filter all search results by ISO date/time range based on the date provided from the
          source of this search data
          - Query = +created_at.date-time:\["2018-10-24T10:05:10+00:00" TO
@@ -311,6 +614,18 @@ VARIABLE | REQUIRED | TYPE | DESCRIPTION
 **wait_timeout_period** | optional | numeric | Retry Wait Period(in seconds) |
 **no_of_retries** | optional | numeric | Number Of Retries |
 **session_timeout** | optional | numeric | Session Timeout(in minutes) |
+**ingestion_type** | optional | string | Ingestion Type (On Poll data source) |
+**first_run_window** | optional | numeric | First Run Window(in days) - backfill window used on the first poll |
+**max_events_per_poll** | optional | numeric | Maximum Events Per Poll - containers created per scheduled poll |
+**event_severity** | optional | string | Event Severity - severity applied to ingested containers |
+**alert_sources** | optional | string | Alerts: standing source filter, comma-separated (e.g. communities,media) |
+**alert_status** | optional | string | Alerts: standing status filter. The endpoint accepts one status only. Select "All" for no filter |
+**alert_origin** | optional | string | Alerts: standing origin filter. The endpoint accepts one origin only. Select "All" for no filter |
+**credential_filter** | optional | string | Compromised Credentials: standing query filter (e.g. +domain.keyword:acme.com) |
+**fresh_credentials_only** | optional | boolean | Compromised Credentials: ingest only credentials not seen in an earlier breach |
+**meets_pw_complexity** | optional | boolean | Compromised Credentials: ingest only passwords that meet the Ignite CCM-E complexity rules |
+**store_plaintext_password** | optional | boolean | Compromised Credentials: store the breached password in the container and artifact (searchable in SOAR) |
+**request_timeout** | optional | numeric | Request Timeout(in seconds) - bounds every API call (default: 120) |
 
 ### Supported Actions
 
@@ -320,8 +635,13 @@ VARIABLE | REQUIRED | TYPE | DESCRIPTION
 [list related reports](#action-list-related-reports) - Fetch a list of all the related intelligence reports from the Flashpoint Platform for the provided report ID <br>
 [get compromised credentials](#action-get-compromised-credentials) - Fetch a list of all the Credential Sightings from the Flashpoint Platform <br>
 [run query](#action-run-query) - Fetch the data by performing a universal search from the Flashpoint Platform <br>
-[list indicators](#action-list-indicators) - Fetch a list of IoCs that occur in the context of an event from the Flashpoint Platform <br>
-[search indicators](#action-search-indicators) - Fetch an IoC value of a specific attribute type from the list of available IoCs on the Flashpoint Platform
+[list indicators](#action-list-indicators) - Fetch a page of the most recent IoCs from the Flashpoint Technical Intelligence v2 API <br>
+[search indicators](#action-search-indicators) - Fetch the IoCs matching the provided IoC value from the Flashpoint Technical Intelligence v2 API, narrowed by the available filters <br>
+[get indicator](#action-get-indicator) - Fetch the full detail of a single IoC from the Flashpoint Technical Intelligence v2 API <br>
+[list sightings](#action-list-sightings) - Fetch a list of sightings from the Flashpoint Technical Intelligence v2 API, optionally scoped to one IoC <br>
+[get sighting](#action-get-sighting) - Fetch the full detail of a single sighting from the Flashpoint Technical Intelligence v2 API <br>
+[list alerts](#action-list-alerts) - Fetch a list of alerts from the Flashpoint alert management API <br>
+[on poll](#action-on-poll) - Ingest Flashpoint alerts or compromised credentials into SOAR containers and artifacts
 
 ## action: 'test connectivity'
 
@@ -356,26 +676,26 @@ PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
 DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
 --------- | ---- | -------- | --------------
 action_result.parameter.limit | numeric | | 501 |
-action_result.data.\*.asset_ids | string | | JEfvV_RvTFC68FCg-ZFaCw |
-action_result.data.\*.assets | string | | /assets/JEfvV_RvTFC68FCg-ZFaCw |
+action_result.data.\*.actors.\* | string | | BLACKNET-00 Ransomware |
+action_result.data.\*.asset_ids.\* | string | | tDBu6JJ2TSeM_Qv6CijfKw |
+action_result.data.\*.assets.\* | string | | /assets/tDBu6JJ2TSeM_Qv6CijfKw |
 action_result.data.\*.body | string | | <html><head></head><body>This is a sample body</body></html> |
+action_result.data.\*.google_document_id | string | | 1Fpc5TTfqnxGjtxISOP_zgfqjdSTn9O7detqG2oRcXjo |
 action_result.data.\*.id | string | `fp report id` | KtHHUswTTSG1IjhreK3ipg |
 action_result.data.\*.ingested_at | string | | 2020-02-18T22:56:38.092+00:00 |
 action_result.data.\*.is_featured | boolean | | True False |
 action_result.data.\*.notified_at | string | | 2020-02-18T22:56:38.092+00:00 |
 action_result.data.\*.platform_url | string | `url` | https://fp.tools/home/intelligence/reports/report/KtHHUswTTSG1IjhreK3ipg#detail |
 action_result.data.\*.posted_at | string | | 2020-02-18T22:56:38.092+00:00 |
-action_result.data.\*.processed_body | string | | This is a processed body |
-action_result.data.\*.processed_summary | string | | This is a processed summary |
 action_result.data.\*.published_status | string | | published |
 action_result.data.\*.sources.\*.original | string | `url` | https://fp.tools/home/ddw/chats/channels/Pg2nv9-CUGm7OQwsvyRIiQ?id=1581881510&fpid=Rk4a-CEeW4Ku4zssexy_kg&limit=&skip=#detail |
-action_result.data.\*.sources.\*.platform_url | string | `url` | |
+action_result.data.\*.sources.\*.platform_url | string | `url` | https://app.flashpoint.io/cti/intelligence/report/ZBPuoqAB7dvfmFc-GwMs |
 action_result.data.\*.sources.\*.source | string | | |
 action_result.data.\*.sources.\*.source_id | string | | |
 action_result.data.\*.sources.\*.title | string | `url` | https://fp.tools/home/ddw/chats/channels/Pg2nv9-CUGm7OQwsvyRIiQ?id=1581881510&fpid=Rk4a-CEeW4Ku4zssexy_kg&limit=&skip=#detail |
 action_result.data.\*.sources.\*.type | string | | External |
 action_result.data.\*.summary | string | | This is a summary message |
-action_result.data.\*.tags | string | | North America |
+action_result.data.\*.tags.\* | string | | Supply chain and third parties |
 action_result.data.\*.title | string | | Test Title |
 action_result.data.\*.title_asset | string | | /assets/YvrgXc0zQGK8rKLYLvZKEw |
 action_result.data.\*.title_asset_id | string | | YvrgXc0zQGK8rKLYLvZKEw |
@@ -405,31 +725,31 @@ PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
 DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
 --------- | ---- | -------- | --------------
 action_result.parameter.report_id | string | `fp report id` | 6a_iIe1CQK2-Rjb_wRcKuw |
-action_result.data.\*.asset_ids | string | | FIYUJy1-RuaFoJw1FstX8g |
-action_result.data.\*.assets | string | | /assets/FIYUJy1-RuaFoJw1FstX8g |
+action_result.data.\*.actors.\* | string | | BLACKNET-00 Ransomware |
 action_result.data.\*.body | string | | <html><head></head><body>This is a sample body</body></html> |
+action_result.data.\*.google_document_id | string | | 1Fpc5TTfqnxGjtxISOP_zgfqjdSTn9O7detqG2oRcXjo |
 action_result.data.\*.id | string | `fp report id` | 6a_iIe1CQK2-Rjb_wRcKuw |
 action_result.data.\*.ingested_at | string | | 2020-02-13T21:10:50.521+00:00 |
 action_result.data.\*.is_featured | boolean | | True False |
 action_result.data.\*.notified_at | string | | 2020-02-13T21:13:24.735+00:00 |
 action_result.data.\*.platform_url | string | `url` | https://fp.tools/home/intelligence/reports/report/6a_iIe1CQK2-Rjb_wRcKuw#detail |
 action_result.data.\*.posted_at | string | | 2020-02-13T21:10:50.521+00:00 |
-action_result.data.\*.processed_body | string | | This is a processed body |
-action_result.data.\*.processed_summary | string | | This is a processed summary |
 action_result.data.\*.published_status | string | | published |
 action_result.data.\*.sources.\*.original | string | `url` | https://fp.tools/home/technical_data/cves/items/IPFW6CIyXzSsPpo4UxBhKw |
-action_result.data.\*.sources.\*.platform_url | string | `url` | |
+action_result.data.\*.sources.\*.platform_url | string | `url` | https://app.flashpoint.io/cti/intelligence/report/ZBPuoqAB7dvfmFc-GwMs |
 action_result.data.\*.sources.\*.source | string | | |
 action_result.data.\*.sources.\*.source_id | string | | |
 action_result.data.\*.sources.\*.title | string | `url` | https://fp.tools/home/technical_data/cves/items/IPFW6CIyXzSsPpo4UxBhKw |
 action_result.data.\*.sources.\*.type | string | | External |
 action_result.data.\*.summary | string | | This is a summary message |
-action_result.data.\*.tags | string | | Global |
+action_result.data.\*.tags.\* | string | | Supply chain and third parties |
 action_result.data.\*.title | string | | Test Title |
 action_result.data.\*.title_asset | string | | /assets/koILoloySXqHVHcdka76hg |
 action_result.data.\*.title_asset_id | string | | koILoloySXqHVHcdka76hg |
 action_result.data.\*.updated_at | string | | 2020-02-13T21:13:24.735+00:00 |
 action_result.data.\*.version_posted_at | string | | 2020-02-13T21:13:24.735+00:00 |
+action_result.data.\*.asset_ids.\* | string | | tDBu6JJ2TSeM_Qv6CijfKw |
+action_result.data.\*.assets.\* | string | | /assets/tDBu6JJ2TSeM_Qv6CijfKw |
 action_result.status | string | | success failed |
 action_result.message | string | | Successfully fetched report |
 action_result.summary | string | | |
@@ -456,31 +776,31 @@ DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
 --------- | ---- | -------- | --------------
 action_result.parameter.limit | numeric | | 50 |
 action_result.parameter.report_id | string | `fp report id` | 6a_iIe1CQK2-Rjb_wRcKuw |
-action_result.data.\*.asset_ids | string | | GH1tAvocTjGM67O8I_FflQ |
-action_result.data.\*.assets | string | | /assets/GH1tAvocTjGM67O8I_FflQ |
+action_result.data.\*.actors.\* | string | | Blinkers |
 action_result.data.\*.body | string | | <html><head></head><body>This is test body</body></html> |
+action_result.data.\*.google_document_id | string | | 1cLbphNDorTE2dDcZjO6kE6KshFSMtFqYU8A7xeph_nY::YQuy2tS9Sp-s0DPwX8euyQ |
 action_result.data.\*.id | string | `fp report id` | 2EtSXz6HRX23Bb4ZvrFoHA |
 action_result.data.\*.ingested_at | string | | 2020-02-12T22:35:11.579+00:00 |
 action_result.data.\*.is_featured | boolean | | True False |
 action_result.data.\*.notified_at | string | | 2020-02-12T22:42:57.323+00:00 |
 action_result.data.\*.platform_url | string | `url` | https://fp.tools/home/intelligence/reports/report/2EtSXz6HRX23Bb4ZvrFoHA#detail |
 action_result.data.\*.posted_at | string | | 2020-02-12T22:35:11.579+00:00 |
-action_result.data.\*.processed_body | string | | This is a processed body |
-action_result.data.\*.processed_summary | string | | This is a processed summary |
 action_result.data.\*.published_status | string | | published |
 action_result.data.\*.sources.\*.original | string | `url` | https://fp.tools/home/technical_data/cves/items/W69B9eS4WUK8sGcGi0m8AA |
-action_result.data.\*.sources.\*.platform_url | string | `url` | |
+action_result.data.\*.sources.\*.platform_url | string | `url` | https://app.flashpoint.io/cti/intelligence/report/ZBPuoqAB7dvfmFc-GwMs |
 action_result.data.\*.sources.\*.source | string | | |
 action_result.data.\*.sources.\*.source_id | string | | |
 action_result.data.\*.sources.\*.title | string | `url` | https://fp.tools/home/technical_data/cves/items/W69B9eS4WUK8sGcGi0m8AA |
 action_result.data.\*.sources.\*.type | string | | External |
 action_result.data.\*.summary | string | | This is a summary message |
-action_result.data.\*.tags | string | | North America |
+action_result.data.\*.tags.\* | string | | Blockchain and cryptocurrency |
 action_result.data.\*.title | string | | Test Title |
 action_result.data.\*.title_asset | string | | /assets/19xWABeWTXGJuFz6Xh4phQ |
 action_result.data.\*.title_asset_id | string | | 19xWABeWTXGJuFz6Xh4phQ |
 action_result.data.\*.updated_at | string | | 2020-02-12T22:42:57.323+00:00 |
 action_result.data.\*.version_posted_at | string | | 2020-02-12T22:42:57.323+00:00 |
+action_result.data.\*.asset_ids.\* | string | | tDBu6JJ2TSeM_Qv6CijfKw |
+action_result.data.\*.assets.\* | string | | /assets/tDBu6JJ2TSeM_Qv6CijfKw |
 action_result.status | string | | success failed |
 action_result.message | string | | Total related reports: 50 |
 action_result.summary.total_related_reports | numeric | | 50 |
@@ -500,6 +820,7 @@ PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
 --------- | -------- | ----------- | ---- | --------
 **filter** | optional | Filtering the data of credentials sightings | string | |
 **limit** | optional | Maximum number of reports to be fetched (default: 500) | numeric | |
+**meets_pw_complexity** | optional | Filter credential results for passwords that meet the password complexity rules defined in Ignite CCM-E settings | boolean | |
 
 #### Action Output
 
@@ -507,11 +828,15 @@ DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
 --------- | ---- | -------- | --------------
 action_result.parameter.filter | string | | +is_fresh:true +breach.fpid:nIbeDs_VXyKedBmuhFEaGQ +domain.keyword:domain.com+is_fresh:true |
 action_result.parameter.limit | numeric | | 500 |
+action_result.parameter.meets_pw_complexity | boolean | | True False |
 action_result.data.\*.\_id | string | | AvnahLkdXU6p-ahsDMr_JQ |
-action_result.data.\*.\_source.basetypes | string | `fp query basetypes` | credential-sighting |
-action_result.data.\*.\_source.body.raw | string | | user.name@domain.com:ya29.GlsrBvzMY9_HL-d7nCA0jlgC0cFUnTtpzrHU94xGiY0OM_sS-0nExZ9y-xWMapu7QKmAml3xkbi4wqE9e58D7XoZ8rF8qYbDNTTEqX4B7X1DMIBzmhT2LcLHpfq4 |
-action_result.data.\*.\_source.breach.basetypes | string | `fp query basetypes` | breach |
+action_result.data.\*.\_source.affected_domain | string | `domain` | signup.live.com |
+action_result.data.\*.\_source.affected_url | string | `url` | https://signup.live.com/signup |
+action_result.data.\*.\_source.basetypes.\* | string | | credential-sighting |
+action_result.data.\*.\_source.body.raw | string | | user.name@domain.com:thisapassword |
+action_result.data.\*.\_source.breach.basetypes.\* | string | | breach |
 action_result.data.\*.\_source.breach.breach_type | string | | credential |
+action_result.data.\*.\_source.breach.context | string | | Combo Collection/Lists/list_01.txt |
 action_result.data.\*.\_source.breach.created_at.date-time | string | | 2019-04-01T12:00:00Z |
 action_result.data.\*.\_source.breach.created_at.timestamp | numeric | | 1554120000 |
 action_result.data.\*.\_source.breach.first_observed_at.date-time | string | | 2019-09-20T03:14:00Z |
@@ -521,14 +846,56 @@ action_result.data.\*.\_source.breach.source | string | | Analyst Research |
 action_result.data.\*.\_source.breach.source_type | string | | Analyst Research |
 action_result.data.\*.\_source.breach.title | string | | Compromised Users from example.com Apr012019 |
 action_result.data.\*.\_source.breach.victim | string | | www.example.com |
+action_result.data.\*.\_source.cookies.\*.affected_domain | string | | example.org |
+action_result.data.\*.\_source.cookies.\*.allow_subdomains | boolean | | True |
+action_result.data.\*.\_source.cookies.\*.key | string | | \_ga |
+action_result.data.\*.\_source.cookies.\*.path | string | | / |
+action_result.data.\*.\_source.cookies.\*.value | string | | GA1.2.1234567890.1700000000 |
 action_result.data.\*.\_source.credential_record_fpid | string | | qOpTj49MUeCXD5VXxKaJZA |
 action_result.data.\*.\_source.customer_id | string | | 0011N00001sDj4A |
-action_result.data.\*.\_source.domain | string | `fp attribute value` `domain` | domain.com |
-action_result.data.\*.\_source.email | string | `fp attribute value` `email` | user.name@domain.com |
+action_result.data.\*.\_source.domain | string | `flashpoint ioc value` `domain` | domain.com |
+action_result.data.\*.\_source.email | string | `email` | user.name@domain.com |
 action_result.data.\*.\_source.extraction_id | string | | tXfm1PGDXRqTmcB57L9-eA |
 action_result.data.\*.\_source.extraction_record_id | string | | dhaaFUx8X4G229qg67jrtA |
 action_result.data.\*.\_source.fpid | string | | AvnahLkdXU6p-ahsDMr_JQ |
 action_result.data.\*._source.header_.indexed_at | numeric | | 1581371433 |
+action_result.data.\*._source.header_.pipeline_duration | numeric | | 63886288675 |
+action_result.data.\*.\_source.heuristics.heuristics_version | string | | 2.18.0 |
+action_result.data.\*.\_source.heuristics.probable_enterprise_host | boolean | | False |
+action_result.data.\*.\_source.infected_host_attributes.fpid | string | | VbMzgQ-uVImWVbPNtoQamA |
+action_result.data.\*.\_source.infected_host_attributes.host_id | string | | 0123456789ABCDEF0123456789ABCDEF |
+action_result.data.\*.\_source.infected_host_attributes.installed_software.\*.name | string | | Windows Defender |
+action_result.data.\*.\_source.infected_host_attributes.installed_software.\*.version | string | | 3.60.45.0 |
+action_result.data.\*.\_source.infected_host_attributes.ip | string | | 203.0.113.10 |
+action_result.data.\*.\_source.infected_host_attributes.ipv4 | string | | 203.0.113.10 |
+action_result.data.\*.\_source.infected_host_attributes.isp.autonomous_system_number | numeric | | 3329 |
+action_result.data.\*.\_source.infected_host_attributes.isp.autonomous_system_organization | string | | Vodafone-panafon Hellenic Telecommunications Company SA |
+action_result.data.\*.\_source.infected_host_attributes.isp.connection_type | string | | Cellular |
+action_result.data.\*.\_source.infected_host_attributes.isp.isp | string | | Vodafone Greece |
+action_result.data.\*.\_source.infected_host_attributes.isp.organization | string | | Vodafone Greece |
+action_result.data.\*.\_source.infected_host_attributes.location.accuracy_radius | numeric | | 100 |
+action_result.data.\*.\_source.infected_host_attributes.location.city_name | string | | Springfield |
+action_result.data.\*.\_source.infected_host_attributes.location.continent_name | string | | North America |
+action_result.data.\*.\_source.infected_host_attributes.location.country_name | string | | United States |
+action_result.data.\*.\_source.infected_host_attributes.location.latitude | numeric | | 37.751 |
+action_result.data.\*.\_source.infected_host_attributes.location.location.lat | numeric | | 37.751 |
+action_result.data.\*.\_source.infected_host_attributes.location.location.lon | numeric | | -97.822 |
+action_result.data.\*.\_source.infected_host_attributes.location.longitude | numeric | | -97.822 |
+action_result.data.\*.\_source.infected_host_attributes.location.subdivision_1_name | string | | Example Region |
+action_result.data.\*.\_source.infected_host_attributes.location.subdivision_2_name | string | | Springfield |
+action_result.data.\*.\_source.infected_host_attributes.machine.architecture | string | | x64 |
+action_result.data.\*.\_source.infected_host_attributes.machine.cpu.\* | string | | Intel(R) Core(TM) i7 CPU 930 @ 2.80GHz, 4 Cores |
+action_result.data.\*.\_source.infected_host_attributes.machine.extra.\*.key | string | | filelocation |
+action_result.data.\*.\_source.infected_host_attributes.machine.extra.\*.value | string | | C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\MsBuild.exe |
+action_result.data.\*.\_source.infected_host_attributes.machine.gpu.\* | string | | NVIDIA GeForce GTX 260 |
+action_result.data.\*.\_source.infected_host_attributes.machine.language.\* | string | | English |
+action_result.data.\*.\_source.infected_host_attributes.machine.os | string | | Windows 10 Pro x64 |
+action_result.data.\*.\_source.infected_host_attributes.machine.ram | string | | 8190.49 Mb |
+action_result.data.\*.\_source.infected_host_attributes.machine.resolution | string | | {Width=1536, Height=864} |
+action_result.data.\*.\_source.infected_host_attributes.machine.user | string | | user01 |
+action_result.data.\*.\_source.infected_host_attributes.malware.family | string | | redline_stealer |
+action_result.data.\*.\_source.infected_host_attributes.malware.scanned_at.date-time | string | | 2024-03-26T03:24:15Z |
+action_result.data.\*.\_source.infected_host_attributes.malware.version | string | `url` | https://t.me/+uuz8-qLUNeU2ZmI0 |
 action_result.data.\*.\_source.is_fresh | boolean | | True False |
 action_result.data.\*.\_source.last_observed_at.date-time | string | | 2019-09-20T03:14:00Z |
 action_result.data.\*.\_source.last_observed_at.timestamp | numeric | | 1568949240 |
@@ -538,9 +905,10 @@ action_result.data.\*.\_source.password_complexity.has_number | boolean | | True
 action_result.data.\*.\_source.password_complexity.has_symbol | boolean | | True False |
 action_result.data.\*.\_source.password_complexity.has_uppercase | boolean | | True False |
 action_result.data.\*.\_source.password_complexity.length | numeric | | 129 |
-action_result.data.\*.\_source.password_complexity.probable_hash_algorithms | string | | bcrypt |
+action_result.data.\*.\_source.password_complexity.probable_hash_algorithms.\* | string | | CRC-24 |
 action_result.data.\*.\_source.times_seen | numeric | | 1 |
-action_result.data.\*.\_type | string | | \_doc |
+action_result.data.\*.\_source.username | string | | user.name@example.com |
+action_result.data.\*.matched_queries.\* | string | | dat.edm.org.r |
 action_result.status | string | | success failed |
 action_result.message | string | | Total results: 4 |
 action_result.summary.total_results | numeric | | 4 |
@@ -568,121 +936,13 @@ DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
 action_result.parameter.limit | numeric | | 478 |
 action_result.parameter.query | string | `fp query basetypes` | +basetypes:card +basetypes:breach +basetypes:cve +basetypes:paste +basetypes:generic-product +basetypes:indicator_attribute +basetypes:credential-sighting +basetypes:vulnerability +basetypes:conversation +basetypes:chan +basetypes:blog +basetypes:reddit +basetypes:forum +basetypes:indicator_attribute+type:"ip-dst|port"+value.\\\*:5.79.68.110|80 |
 action_result.data.\*.\_id | string | | 8dKFsRoeV0mP8zOY1uYcLQ |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.authors | string | | TESTAUTHORS |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.description | string | | This is a test description |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.galaxy_id | string | | 22 |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.id | string | | 11086 |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.meta.external_id | string | | T1192 |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.meta.kill_chain | string | | test-attack:enterprise-attack:initial-access |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.meta.mitre_data_sources | string | | Mail server |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.meta.mitre_platforms | string | | macOS |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.meta.refs | string | `url` | https:/testdomainlink.com/test |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.source | string | `url` | https://testdomainlink.com/test |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.tag_id | string | | 270 |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.tag_name | string | | misp-galaxy:test-enterprise-attack-attack-pattern="Exfiltration Over Command and Control Channel - T1041" |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.type | string | | test-enterprise-attack-attack-pattern |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.uuid | string | | fb2242d8-1707-11e8-ab20-6fa7448c3640 |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.value | string | | Exfiltration Over Command and Control Channel - T1041 |
-action_result.data.\*.\_source.Event.Galaxy.\*.GalaxyCluster.\*.version | string | | 4 |
-action_result.data.\*.\_source.Event.Galaxy.\*.description | string | | This is a test description |
-action_result.data.\*.\_source.Event.Galaxy.\*.icon | string | | map |
-action_result.data.\*.\_source.Event.Galaxy.\*.id | string | | 22 |
-action_result.data.\*.\_source.Event.Galaxy.\*.name | string | | Test Name - Example |
-action_result.data.\*.\_source.Event.Galaxy.\*.type | string | | mitre-enterprise-attack-attack-pattern |
-action_result.data.\*.\_source.Event.Galaxy.\*.uuid | string | | fa7016a8-1707-11e8-82d0-1b73d76eb204 |
-action_result.data.\*.\_source.Event.Galaxy.\*.version | string | | 4 |
-action_result.data.\*.\_source.Event.Org.id | string | | 1 |
-action_result.data.\*.\_source.Event.Org.name | string | | FP-SME-INT |
-action_result.data.\*.\_source.Event.Org.uuid | string | | 5af24c91-8c9c-4b8d-8a59-620c0a640c05 |
-action_result.data.\*.\_source.Event.Orgc.id | string | | 1 |
-action_result.data.\*.\_source.Event.Orgc.name | string | | FP-SME-INT |
-action_result.data.\*.\_source.Event.Orgc.uuid | string | | 5af24c91-8c9c-4b8d-8a59-620c0a640c05 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.Org.id | string | | 1 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.Org.name | string | | FP-SME-INT |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.Org.uuid | string | | 5af24c91-8c9c-4b8d-8a59-620c0a640c05 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.Orgc.id | string | | 1 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.Orgc.name | string | | FP-SME-INT |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.Orgc.uuid | string | | 5af24c91-8c9c-4b8d-8a59-620c0a640c05 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.analysis | string | | 0 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.date | string | | 2019-02-05 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.distribution | string | | 3 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.id | string | | 3472 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.info | string | | 2018-11-26 21:40:00: Nodistribute - nodistribute.com |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.org_id | string | | 1 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.orgc_id | string | | 1 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.published | boolean | | True False |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.threat_level_id | string | | 2 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.timestamp | string | | 1549411296 |
-action_result.data.\*.\_source.Event.RelatedEvent.\*.Event.uuid | string | | 5c5a23e0-a67c-4270-ba6e-12600a640c05 |
-action_result.data.\*.\_source.Event.Tag.\*.colour | string | | #b9b062 |
-action_result.data.\*.\_source.Event.Tag.\*.exportable | boolean | | True False |
-action_result.data.\*.\_source.Event.Tag.\*.hide_tag | boolean | | True False |
-action_result.data.\*.\_source.Event.Tag.\*.id | string | | 488 |
-action_result.data.\*.\_source.Event.Tag.\*.name | string | `file name` | Nodistribute |
-action_result.data.\*.\_source.Event.Tag.\*.user_id | boolean | | True False |
-action_result.data.\*.\_source.Event.analysis | string | | 0 |
-action_result.data.\*.\_source.Event.attribute_count | string | | 1 |
-action_result.data.\*.\_source.Event.date | string | | 2019-02-05 |
-action_result.data.\*.\_source.Event.disable_correlation | boolean | | True False |
-action_result.data.\*.\_source.Event.distribution | string | | 3 |
-action_result.data.\*.\_source.Event.event_creator_email | string | `email` | extxvbhjx@testdomainlink.com |
-action_result.data.\*.\_source.Event.extends_uuid | string | | |
-action_result.data.\*.\_source.Event.fpid | string | | tJjXjAb-Un6HJ1fGwChZ7g |
-action_result.data.\*.\_source.Event.id | string | | 5070 |
-action_result.data.\*.\_source.Event.info | string | | 2018-12-04 13:10:00: Nodistribute - nodistribute.com |
-action_result.data.\*.\_source.Event.locked | boolean | | True False |
-action_result.data.\*.\_source.Event.org_id | string | | 1 |
-action_result.data.\*.\_source.Event.orgc_id | string | | 1 |
-action_result.data.\*.\_source.Event.proposal_email_lock | boolean | | True False |
-action_result.data.\*.\_source.Event.publish_timestamp | string | | 1549413013 |
-action_result.data.\*.\_source.Event.published | boolean | | True False |
-action_result.data.\*.\_source.Event.sharing_group_id | string | | 0 |
-action_result.data.\*.\_source.Event.threat_level_id | string | | 2 |
-action_result.data.\*.\_source.Event.timestamp | string | | 1549413013 |
-action_result.data.\*.\_source.Event.uuid | string | | 5c5a2a95-4b88-4db4-a065-124a0a640c05 |
-action_result.data.\*.\_source.Tag.\*.colour | string | | #000000 |
-action_result.data.\*.\_source.Tag.\*.exportable | boolean | | True False |
-action_result.data.\*.\_source.Tag.\*.hide_tag | boolean | | True False |
-action_result.data.\*.\_source.Tag.\*.id | string | | 7 |
-action_result.data.\*.\_source.Tag.\*.name | string | | malware:destructive:wiper |
-action_result.data.\*.\_source.Tag.\*.user_id | boolean | | True False |
-action_result.data.\*.\_source.account_domain | string | | testdomainlink.com |
-action_result.data.\*.\_source.account_holder_information.full_name | string | | Name |
-action_result.data.\*.\_source.account_holder_information.location.address | string | | Waterbury United States |
-action_result.data.\*.\_source.account_holder_information.location.country.raw | string | | US |
-action_result.data.\*.\_source.account_organization | string | | Organization |
-action_result.data.\*.\_source.account_type | string | | Personal |
-action_result.data.\*.\_source.balance | numeric | | 936 |
-action_result.data.\*.\_source.bank_name | string | | Discover Bank |
-action_result.data.\*.\_source.base.basetypes | string | `fp query basetypes` | base |
-action_result.data.\*.\_source.base.fpid | string | | 17Oc0omBXUe0HltX8Yk0hw |
-action_result.data.\*.\_source.base.native_id | string | | 20151 |
-action_result.data.\*.\_source.base.raw | string | | This is a test base raw |
-action_result.data.\*.\_source.base.release_date.date-time | string | | 2019-04-22T00:00:00+00:00 |
-action_result.data.\*.\_source.base.release_date.raw | string | | 2019-04-22 |
-action_result.data.\*.\_source.base.release_date.timestamp | numeric | | 1555891200 |
-action_result.data.\*.\_source.base.title | string | | Test Title |
-action_result.data.\*.\_source.basetypes | string | `fp query basetypes` | cvv breach advisory post generic-product indicator_attribute credential-sighting vulnerability message aggregation |
-action_result.data.\*.\_source.bin | numeric | | 601100 |
-action_result.data.\*.\_source.board.name | string | | pol |
-action_result.data.\*.\_source.board.native_id | string | | pol |
-action_result.data.\*.\_source.board.site.behavior | string | | replace |
-action_result.data.\*.\_source.board.site.href | string | | urn:fp:type:resource.qualified.site:Ra2dBSXnXjKqoLS7wJPWgw |
-action_result.data.\*.\_source.board.site.target | string | | $.site |
-action_result.data.\*.\_source.board.title | string | | pol |
-action_result.data.\*.\_source.board.type | string | | board |
-action_result.data.\*.\_source.body.enrichments.cves | string | | CVE-2016-7266 |
-action_result.data.\*.\_source.body.enrichments.domains | string | `fp attribute value` `domain` | chaxxe-xx-fall-bxxinx.html www.testdomainlink.va |
-action_result.data.\*.\_source.body.enrichments.hashtags | string | | #HASHTAG |
-action_result.data.\*.\_source.body.enrichments.language | string | | en ar |
-action_result.data.\*.\_source.body.enrichments.links.\*.href | string | `url` | https://schemas.testdomainlink.com/2017/resxxrce/collexxxons/daxxxxse_row.json |
-action_result.data.\*.\_source.body.enrichments.social_media_handles | string | | @blxxfatxxxer |
+action_result.data.\*.\_source.affected_domain | string | | signup-live-com.translate.goog |
+action_result.data.\*.\_source.affected_url | string | `url` | https://signup-live-com.translate.goog/ |
+action_result.data.\*.\_source.basetypes.\* | string | | breach |
 action_result.data.\*.\_source.body.raw | string | `url` | This is a test body |
-action_result.data.\*.\_source.body.text/html+sanitized | string | `url` | This is a test body |
-action_result.data.\*.\_source.body.text/html-sanitized | string | | |
-action_result.data.\*.\_source.body.text/plain | string | `url` | This is test body text/plan |
-action_result.data.\*.\_source.breach.basetypes | string | | breach |
+action_result.data.\*.\_source.breach.basetypes.\* | string | | breach |
 action_result.data.\*.\_source.breach.breach_type | string | | credential |
+action_result.data.\*.\_source.breach.context | string | | Combo Collection/Lists/list_01.txt |
 action_result.data.\*.\_source.breach.created_at.date-time | string | | 2019-04-01T12:00:00Z |
 action_result.data.\*.\_source.breach.created_at.timestamp | numeric | | 1554120000 |
 action_result.data.\*.\_source.breach.first_observed_at.date-time | string | | 2019-09-20T03:14:00Z |
@@ -691,788 +951,88 @@ action_result.data.\*.\_source.breach.fpid | string | | ZxVbExxxfghuxBX6goxxg |
 action_result.data.\*.\_source.breach.source | string | | Analyst Research |
 action_result.data.\*.\_source.breach.source_type | string | | Analyst Research |
 action_result.data.\*.\_source.breach.title | string | | Compromised Users from example.com Apr012019 |
-action_result.data.\*.\_source.breach.victim | string | | www.example.com |
 action_result.data.\*.\_source.breach_intersections.\*.count | numeric | | 7167 |
 action_result.data.\*.\_source.breach_intersections.\*.dump | string | | en6DWDl_VKyuLUvCsHk_EQ |
 action_result.data.\*.\_source.breach_intersections.\*.title | string | | Compromised Users from example.com Sept2015 |
-action_result.data.\*.\_source.breach_intersections.count | numeric | | 2 |
-action_result.data.\*.\_source.breach_intersections.dump | string | | b7klT43iV-SLtY1sE-\_vYg |
-action_result.data.\*.\_source.breach_intersections.title | string | | Compromised Users from test: File "1234" Jan052020 |
-action_result.data.\*.\_source.card_number | string | | 4147342xxxxxxx442 |
-action_result.data.\*.\_source.card_type | string | | Discover Bank Discover Platinum Credit |
-action_result.data.\*.\_source.cardholder_information.date_of_birth.raw | string | | NULL |
-action_result.data.\*.\_source.cardholder_information.email | string | | yes |
-action_result.data.\*.\_source.cardholder_information.first | string | | Firstname |
-action_result.data.\*.\_source.cardholder_information.full_name | string | | Full Name |
-action_result.data.\*.\_source.cardholder_information.is_date_of_birth_available | boolean | | True False |
-action_result.data.\*.\_source.cardholder_information.is_email_available | boolean | | True False |
-action_result.data.\*.\_source.cardholder_information.is_mothers_maiden_name_available | boolean | | True False |
-action_result.data.\*.\_source.cardholder_information.is_phone_number_available | boolean | | True False |
-action_result.data.\*.\_source.cardholder_information.is_social_security_number_available | boolean | | True False |
-action_result.data.\*.\_source.cardholder_information.last | string | | LAST NAME |
-action_result.data.\*.\_source.cardholder_information.location.address | string | | 1245M 2026 |
-action_result.data.\*.\_source.cardholder_information.location.city | string | | City |
-action_result.data.\*.\_source.cardholder_information.location.country.abbreviation | string | | AB |
-action_result.data.\*.\_source.cardholder_information.location.country.full_name | string | | Country Name |
-action_result.data.\*.\_source.cardholder_information.location.country.raw | string | | AB |
-action_result.data.\*.\_source.cardholder_information.location.raw | string | | 1104 |
-action_result.data.\*.\_source.cardholder_information.location.region.abbreviation | string | | UNKNOWN |
-action_result.data.\*.\_source.cardholder_information.location.region.full_name | string | | NY |
-action_result.data.\*.\_source.cardholder_information.location.region.raw | string | | NC |
-action_result.data.\*.\_source.cardholder_information.location.zip_code | string | | 28904 |
-action_result.data.\*.\_source.cardholder_information.phone_number | string | | 81392026 |
-action_result.data.\*.\_source.cardholder_information.social_security_number.full | string | | 2013 |
-action_result.data.\*.\_source.category | string | | Money Payload delivery |
-action_result.data.\*.\_source.container.admins_count | numeric | | 0 |
-action_result.data.\*.\_source.container.basetypes | string | | container |
-action_result.data.\*.\_source.container.body.enrichments.domains | string | `fp attribute value` `domain` | 15g2q4s6kj931.png |
-action_result.data.\*.\_source.container.body.enrichments.language | string | | en |
-action_result.data.\*.\_source.container.body.enrichments.links.\*.href | string | `url` `ip` | https://example.com/test.gif |
-action_result.data.\*.\_source.container.body.raw | string | `url` | https://example.com/test.gif |
-action_result.data.\*.\_source.container.body.text/html+sanitized | string | `url` | https://example.com/test.gif |
-action_result.data.\*.\_source.container.body.text/plain | string | `url` | https://example.com/test.gif |
-action_result.data.\*.\_source.container.category | string | | Uncategorized |
-action_result.data.\*.\_source.container.container.basetypes | string | | container |
-action_result.data.\*.\_source.container.container.body.enrichments.bins | string | | 397466 |
-action_result.data.\*.\_source.container.container.body.enrichments.bitcoin_addresses | string | | 3xvP5WbQNw4HPyEYvwtKC6aubQ |
-action_result.data.\*.\_source.container.container.body.enrichments.domains | string | `fp attribute value` `domain` | testdomainlink.com |
-action_result.data.\*.\_source.container.container.body.enrichments.email_addresses | string | `fp attribute value` `email` | kulture@kulturemedia.org |
-action_result.data.\*.\_source.container.container.body.enrichments.facebook_urls | string | | groups |
-action_result.data.\*.\_source.container.container.body.enrichments.hashtags | string | | #hashtag |
-action_result.data.\*.\_source.container.container.body.enrichments.language | string | | en |
-action_result.data.\*.\_source.container.container.body.enrichments.links.\*.href | string | `url` `ip` | https://www.testdomainlink.com/en |
-action_result.data.\*.\_source.container.container.body.enrichments.pans | string | | 3974663043 |
-action_result.data.\*.\_source.container.container.body.enrichments.partial_cards | string | | 3974663043 |
-action_result.data.\*.\_source.container.container.body.enrichments.social_media_handles | string | | @txxxxls |
-action_result.data.\*.\_source.container.container.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.container.container.body.text/html+sanitized | string | | This is a test body |
-action_result.data.\*.\_source.container.container.body.text/plain | string | | This is a test body |
-action_result.data.\*.\_source.container.container.created_at.date-time | string | | 2010-09-09T14:30:26+00:00 |
-action_result.data.\*.\_source.container.container.created_at.raw | string | | 2010-09-09 14:30:26+00:00 |
-action_result.data.\*.\_source.container.container.created_at.timestamp | numeric | | 1284042626 |
-action_result.data.\*.\_source.container.container.enrichments.language | string | | vi |
-action_result.data.\*.\_source.container.container.first_observed_at.date-time | string | | 2014-04-21T22:22:00.462230+00:00 |
-action_result.data.\*.\_source.container.container.first_observed_at.raw | string | | 2014-04-21 22:22:00.462230+00:00 |
-action_result.data.\*.\_source.container.container.first_observed_at.timestamp | numeric | | 1398118920 |
-action_result.data.\*.\_source.container.container.fpid | string | | IiHLxxxxUTSAM--a-b2qNw |
-action_result.data.\*.\_source.container.container.icon_url | string | | https://example.com/icons/541672061005856769/f38df3477629c0103733dfffc4541f3b.jpg |
-action_result.data.\*.\_source.container.container.is_deleted | boolean | | True False |
-action_result.data.\*.\_source.container.container.last_observed_at.date-time | string | | 2019-07-15T02:27:07+00:00 |
-action_result.data.\*.\_source.container.container.last_observed_at.raw | string | | 1563157627.517987 |
-action_result.data.\*.\_source.container.container.last_observed_at.timestamp | numeric | | 1563157627 |
-action_result.data.\*.\_source.container.container.legacy_fpid | string | | sfiwvykIWsiOYbzKFVm-8w |
-action_result.data.\*.\_source.container.container.name | string | | Container Name |
-action_result.data.\*.\_source.container.container.native_id | string | | Native ID |
-action_result.data.\*.\_source.container.container.num_subscribers | numeric | | 1076809 |
-action_result.data.\*.\_source.container.container.region | string | | eu_central |
-action_result.data.\*.\_source.container.container.server_owner.id | string | | 303560006810776586 |
-action_result.data.\*.\_source.container.container.server_owner.username | string | | Grenus#9357 |
-action_result.data.\*.\_source.container.container.source_uri | string | `url` | https://testdomainlink.com/source/ |
-action_result.data.\*.\_source.container.container.title | string | | pol |
-action_result.data.\*.\_source.container.container.type | string | | board |
-action_result.data.\*.\_source.container.container.url | string | `fp attribute value` `url` | https://testdomainlink.com/r/ |
-action_result.data.\*.\_source.container.container.verification_level | string | | 4 |
-action_result.data.\*.\_source.container.created_at.date-time | string | | 2019-07-14T16:04:12+00:00 |
-action_result.data.\*.\_source.container.created_at.raw | string | | 1464629880 2013-01-31 18:03:58+00:00 2019-07-14 16:04:12+00:00 |
-action_result.data.\*.\_source.container.created_at.timestamp | numeric | | 1563120252 |
-action_result.data.\*.\_source.container.description | string | `url` | Test Description |
-action_result.data.\*.\_source.container.enrichments.domains | string | `fp attribute value` `domain` | testdomainlink.com |
-action_result.data.\*.\_source.container.enrichments.language | string | | en |
-action_result.data.\*.\_source.container.enrichments.links.\*.href | string | `url` `ip` | http://testdomainlink.com |
-action_result.data.\*.\_source.container.first_observed_at.date-time | string | | 2014-04-23T03:08:24.610332+00:00 |
-action_result.data.\*.\_source.container.first_observed_at.raw | string | | 2014-04-23 03:08:24.610332+00:00 |
-action_result.data.\*.\_source.container.first_observed_at.timestamp | numeric | | 1398222504 |
-action_result.data.\*.\_source.container.fpid | string | | U_jW3cTZUpKMrHKBVZY0Dw |
-action_result.data.\*.\_source.container.is_deleted | boolean | | True False |
-action_result.data.\*.\_source.container.kicked_count | numeric | | 0 |
-action_result.data.\*.\_source.container.last_observed_at.date-time | string | | 2019-07-15T02:26:04+00:00 |
-action_result.data.\*.\_source.container.last_observed_at.raw | string | | 1563157564.722768 |
-action_result.data.\*.\_source.container.last_observed_at.timestamp | numeric | | 1563157564 |
-action_result.data.\*.\_source.container.legacy_fpid | string | | 8AWJcntPVYeklC4n5273uw |
-action_result.data.\*.\_source.container.name | string | `url` | Test Name |
-action_result.data.\*.\_source.container.native_id | string | | cd4npa |
-action_result.data.\*.\_source.container.num_replies | numeric | | 838 |
-action_result.data.\*.\_source.container.participants_count | numeric | | 382 |
-action_result.data.\*.\_source.container.permission_overrides.\*.overrides | string | | {'embed_links': False, 'read_message_history': True, 'mention_everyone': False, 'add_reactions': True, 'attach_files': False, 'send_tts_messages': False} |
-action_result.data.\*.\_source.container.permission_overrides.\*.role.id | string | | 541672061005856769 |
-action_result.data.\*.\_source.container.permission_overrides.\*.role.name | string | | @everyone |
-action_result.data.\*.\_source.container.raw_href | string | `url` | https://testdomainlink.com/test |
-action_result.data.\*.\_source.container.reputation.number_of_downvotes | numeric | | 581 |
-action_result.data.\*.\_source.container.reputation.number_of_upvotes | numeric | | 582 |
-action_result.data.\*.\_source.container.site_actor.avatar_uri.href | string | | https://testdomainlink.com/user/123e3e.jpg |
-action_result.data.\*.\_source.container.site_actor.basetypes | string | | site_actor |
-action_result.data.\*.\_source.container.site_actor.flair.flair_text | string | | Cringetopia Overlord |
-action_result.data.\*.\_source.container.site_actor.fpid | string | | vhGyvSzrW6WTl3QrJJWudg 3tWg7NpuVZ2yBBBrz1FLAA |
-action_result.data.\*.\_source.container.site_actor.is_admin | boolean | | True False |
-action_result.data.\*.\_source.container.site_actor.last_observed_at.date-time | string | | 2019-07-15T02:19:23+00:00 |
-action_result.data.\*.\_source.container.site_actor.last_observed_at.raw | string | | 1563157163.299181 |
-action_result.data.\*.\_source.container.site_actor.last_observed_at.timestamp | numeric | | 1563157163 |
-action_result.data.\*.\_source.container.site_actor.names.aliases | string | | vxxtax |
-action_result.data.\*.\_source.container.site_actor.names.handle | string | | testname cam130894 |
-action_result.data.\*.\_source.container.site_actor.native_id | string | | x_ertxxx_ty |
-action_result.data.\*.\_source.container.site_actor.site.base_uris | string | `url` | https://www.testdomainlink.com |
-action_result.data.\*.\_source.container.site_actor.site.basetypes | string | | site |
-action_result.data.\*.\_source.container.site_actor.site.created_at.date-time | string | | 2017-01-25T17:25:41 |
-action_result.data.\*.\_source.container.site_actor.site.description.raw | string | | This is an example description |
-action_result.data.\*.\_source.container.site_actor.site.fpid | string | | kGh8HzrbVM6HA83csB8D8Q |
-action_result.data.\*.\_source.container.site_actor.site.site_type | string | | Example |
-action_result.data.\*.\_source.container.site_actor.site.source_uri | string | | testdomainlink.com |
-action_result.data.\*.\_source.container.site_actor.site.tags.\*.name | string | | Language |
-action_result.data.\*.\_source.container.site_actor.site.tags.\*.parent_tag.name | string | | Language |
-action_result.data.\*.\_source.container.site_actor.site.title | string | | Test Title |
-action_result.data.\*.\_source.container.site_actor.site.updated_at.date-time | string | | 2019-05-28T15:25:06 |
-action_result.data.\*.\_source.container.site_actor.source_uri | string | `url` | https://testdomainlink.com/r/?ref=xxxdnext |
-action_result.data.\*.\_source.container.site_actor.url | string | `fp attribute value` `url` | https://testdomainlink.com/user/xxx130894 |
-action_result.data.\*._source.container.source_uri | string | `url` | https://testdomainlink.com |
-action_result.data.\*._source.container.title | string | `url` | Test Title |
-action_result.data.\*._source.container.topic | string | | \<a:tru:533929657473564672> \<a:tru2:533929657834274816> \<a:tru3:533929656999739395> \<a:tru4:533929657486278667> \<a:tru5:533929656735367168> \<a:tru6:533929870561116173> \<a:tru2:533929657834274816>\<a:t_:409863142827622400>\<a:o_:409863139417391115> \<:d:535397902550302722> \<:y:535401467981332480> \<:d:535397902550302722> \<:d:535397902550302722> \<:y_:535401467729805323> \<a:testo:400377695403245569>\*\*Support Our Server - \<#412449213960683530>\<a:giflove:399339112890630165> Check Out Our Website- https://test.me \<a:test:432612759981522944>Invite link https://discord.gg/ABCDEF \*\*\<a:AmbitiousMistyHoopoesmall:400381611083956245> |
-action_result.data.\*.\_source.container.type | string | | channel |
-action_result.data.\*.\_source.container.url | string | `fp attribute value` `url` | https://example.com/test.gif |
-action_result.data.\*.\_source.container.username | string | `url` `user name` | username |
-action_result.data.\*.\_source.container_position.index_number | numeric | | 1 |
+action_result.data.\*.\_source.cookies.\*.affected_domain | string | | example.org |
+action_result.data.\*.\_source.cookies.\*.allow_subdomains | boolean | | True |
+action_result.data.\*.\_source.cookies.\*.key | string | | \_ga |
+action_result.data.\*.\_source.cookies.\*.path | string | | / |
+action_result.data.\*.\_source.cookies.\*.value | string | | GA1.2.1234567890.1700000000 |
 action_result.data.\*.\_source.created_at.date-time | string | | 2019-07-14T19:56:37+00:00 |
-action_result.data.\*.\_source.created_at.raw | string | | 2019-07-14 19:56:37+00:00 |
 action_result.data.\*.\_source.created_at.timestamp | numeric | | 1563134197 |
 action_result.data.\*.\_source.credential_record_fpid | string | | qOpTj49MUeCXD5VXxKaJZA |
-action_result.data.\*.\_source.credit_cards.\*.raw | string | | || |
 action_result.data.\*.\_source.customer_id | string | | 0011N00001sDj4A |
-action_result.data.\*.\_source.cve.basetypes | string | | vulnerability |
-action_result.data.\*.\_source.cve.fpid | string | | V1hUGZkyUgmd-uLt5diIdw |
-action_result.data.\*.\_source.cve.last_observed_at.date-time | string | | 2020-03-03T19:00:02+00:00 |
-action_result.data.\*.\_source.cve.last_observed_at.raw | string | | 2020-03-03T19:00:02 |
-action_result.data.\*.\_source.cve.last_observed_at.timestamp | numeric | | 1583262002 |
-action_result.data.\*.\_source.cve.mitre.basetypes | string | | mitre |
-action_result.data.\*.\_source.cve.mitre.body.enrichments.cves | string | | CVE-2016-7266 |
-action_result.data.\*.\_source.cve.mitre.body.enrichments.links.\*.href | string | `url` | https://schemas.testdomainlink.com/2017/resource/collections/database_row.json |
-action_result.data.\*.\_source.cve.mitre.body.raw | string | | This is a test body raw |
-action_result.data.\*.\_source.cve.mitre.body.text/html-sanitized | string | | This is a test body text/html-sanitized |
-action_result.data.\*.\_source.cve.mitre.body.text/plain | string | | This is a test body text/plain |
-action_result.data.\*.\_source.cve.mitre.created_at.date-time | string | | 2016-09-09T00:00:00+00:00 |
-action_result.data.\*.\_source.cve.mitre.created_at.raw | string | | 20160909 |
-action_result.data.\*.\_source.cve.mitre.created_at.timestamp | numeric | | 1473379200 |
-action_result.data.\*.\_source.cve.mitre.fpid | string | | EcUGRaNNXPevq6Jo2yo8og |
-action_result.data.\*.\_source.cve.mitre.last_observed_at.date-time | string | | 2020-03-03T19:00:02+00:00 |
-action_result.data.\*.\_source.cve.mitre.last_observed_at.raw | string | | 2020-03-03T19:00:02 |
-action_result.data.\*.\_source.cve.mitre.last_observed_at.timestamp | numeric | | 1583262002 |
-action_result.data.\*.\_source.cve.mitre.native_id | string | | [28355, 'CVE-2016-7232'] |
-action_result.data.\*.\_source.cve.mitre.phase | string | | Assigned (20160909) |
-action_result.data.\*.\_source.cve.mitre.site.base_uris | string | `url` | http://testdomainlink.org |
-action_result.data.\*.\_source.cve.mitre.site.basetypes | string | | site |
-action_result.data.\*.\_source.cve.mitre.site.created_at.date-time | string | | 2019-02-14T17:21:27.064334 |
-action_result.data.\*.\_source.cve.mitre.site.description.raw | string | | This is a test description. |
-action_result.data.\*.\_source.cve.mitre.site.fpid | string | | YJKOYduNWE2PVi1WiTEMOg |
-action_result.data.\*.\_source.cve.mitre.site.site_type | string | | Site Type |
-action_result.data.\*.\_source.cve.mitre.site.source_uri | string | | testdomainlink.org |
-action_result.data.\*.\_source.cve.mitre.site.tags.\*.name | string | | Security |
-action_result.data.\*.\_source.cve.mitre.site.tags.\*.parent_tag.name | string | | Cyber Threat |
-action_result.data.\*.\_source.cve.mitre.site.title | string | | MITRE |
-action_result.data.\*.\_source.cve.mitre.site.updated_at.date-time | string | | 2019-02-14T17:26:05.741343 |
-action_result.data.\*.\_source.cve.mitre.status | string | | Candidate |
-action_result.data.\*.\_source.cve.mitre.title | string | | CVE-2016-7232 |
-action_result.data.\*.\_source.cve.native_id | string | | CVE-2016-7232 |
-action_result.data.\*.\_source.cve.nist.assigner | string | `email` | cve@mitre.org |
-action_result.data.\*.\_source.cve.nist.basetypes | string | | nist |
-action_result.data.\*.\_source.cve.nist.body.enrichments.cves | string | | CVE-2016-7266 |
-action_result.data.\*.\_source.cve.nist.body.enrichments.links.\*.href | string | `url` | https://schemas.testdomainlink.com/2017/resource/colxxxxions/daxxbxxe_row.json |
-action_result.data.\*.\_source.cve.nist.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.cve.nist.body.text/html-sanitized | string | | This is a test body text/html-sanitized |
-action_result.data.\*.\_source.cve.nist.body.text/plain | string | | This is a test body text/plain |
-action_result.data.\*.\_source.cve.nist.configurations.\*.cpe23_uri | string | | cpe:2.3:a:microsoft:office:2010:sp2:\*:\*:\*:\*:\*:\* |
-action_result.data.\*.\_source.cve.nist.configurations.\*.version_end_including | string | | 2.3.34 |
-action_result.data.\*.\_source.cve.nist.created_at.date-time | string | | 2016-11-10T06:59:00+00:00 |
-action_result.data.\*.\_source.cve.nist.created_at.raw | string | | 2016-11-10T06:59Z |
-action_result.data.\*.\_source.cve.nist.created_at.timestamp | numeric | | 1478761140 |
-action_result.data.\*.\_source.cve.nist.cvssv2.access_complexity | string | | MEDIUM |
-action_result.data.\*.\_source.cve.nist.cvssv2.access_vector | string | | NETWORK |
-action_result.data.\*.\_source.cve.nist.cvssv2.authentication | string | | NONE |
-action_result.data.\*.\_source.cve.nist.cvssv2.availability_impact | string | | COMPLETE |
-action_result.data.\*.\_source.cve.nist.cvssv2.base_score | numeric | | 9.3 |
-action_result.data.\*.\_source.cve.nist.cvssv2.confidentiality_impact | string | | COMPLETE |
-action_result.data.\*.\_source.cve.nist.cvssv2.exploitability_score | numeric | | 8.6 |
-action_result.data.\*.\_source.cve.nist.cvssv2.impact_score | numeric | | 10 |
-action_result.data.\*.\_source.cve.nist.cvssv2.integrity_impact | string | | COMPLETE |
-action_result.data.\*.\_source.cve.nist.cvssv2.severity | string | | HIGH |
-action_result.data.\*.\_source.cve.nist.cvssv2.vector_string | string | | AV:N/AC:M/Au:N/C:C/I:C/A:C |
-action_result.data.\*.\_source.cve.nist.cvssv3.attack_complexity | string | | LOW |
-action_result.data.\*.\_source.cve.nist.cvssv3.attack_vector | string | | LOCAL |
-action_result.data.\*.\_source.cve.nist.cvssv3.availability_impact | string | | HIGH |
-action_result.data.\*.\_source.cve.nist.cvssv3.base_score | numeric | | 7.8 |
-action_result.data.\*.\_source.cve.nist.cvssv3.confidentiality_impact | string | | HIGH |
-action_result.data.\*.\_source.cve.nist.cvssv3.exploitability_score | numeric | | 1.8 |
-action_result.data.\*.\_source.cve.nist.cvssv3.impact_score | numeric | | 5.9 |
-action_result.data.\*.\_source.cve.nist.cvssv3.integrity_impact | string | | HIGH |
-action_result.data.\*.\_source.cve.nist.cvssv3.privileges_required | string | | NONE |
-action_result.data.\*.\_source.cve.nist.cvssv3.scope | string | | UNCHANGED |
-action_result.data.\*.\_source.cve.nist.cvssv3.severity | string | | HIGH |
-action_result.data.\*.\_source.cve.nist.cvssv3.user_interaction | string | | REQUIRED |
-action_result.data.\*.\_source.cve.nist.cvssv3.vector_string | string | | CVSS:3.0/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H |
-action_result.data.\*.\_source.cve.nist.fpid | string | | D_2yAYSFVaWo7aGXsGN9LQ |
-action_result.data.\*.\_source.cve.nist.last_observed_at.date-time | string | | 2020-03-02T19:00:02+00:00 |
-action_result.data.\*.\_source.cve.nist.last_observed_at.raw | string | | 2020-03-02T19:00:02 |
-action_result.data.\*.\_source.cve.nist.last_observed_at.timestamp | numeric | | 1583175602 |
-action_result.data.\*.\_source.cve.nist.native_id | string | | [28350, 'CVE-2016-7232'] |
-action_result.data.\*.\_source.cve.nist.products.\*.product_name | string | | office |
-action_result.data.\*.\_source.cve.nist.products.\*.vendor_name | string | | microsoft |
-action_result.data.\*.\_source.cve.nist.references.\*.name | string | `url` | 94005 |
-action_result.data.\*.\_source.cve.nist.references.\*.refsource | string | | BID |
-action_result.data.\*.\_source.cve.nist.references.\*.tags | string | | VDB Entry |
-action_result.data.\*.\_source.cve.nist.references.\*.url | string | `fp attribute value` `url` | http://www.testdomainlink.com/bid/94005 |
-action_result.data.\*.\_source.cve.nist.site.base_uris | string | `url` | http://testdomainlink.com |
-action_result.data.\*.\_source.cve.nist.site.basetypes | string | | site |
-action_result.data.\*.\_source.cve.nist.site.created_at.date-time | string | | 2019-02-14T16:51:17.949358 |
-action_result.data.\*.\_source.cve.nist.site.description.raw | string | | The NIST National Vulnerability Database provides a feed of known vulnerabilities (CVEs) and related information. |
-action_result.data.\*.\_source.cve.nist.site.fpid | string | | IPp5rJZgXhuvZYu2PXMW3Q |
-action_result.data.\*.\_source.cve.nist.site.site_type | string | | Site Type |
-action_result.data.\*.\_source.cve.nist.site.source_uri | string | | testdomainlink.com |
-action_result.data.\*.\_source.cve.nist.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.cve.nist.site.title | string | | Test Site Title |
-action_result.data.\*.\_source.cve.nist.site.updated_at.date-time | string | | 2019-02-14T16:51:18.230655 |
-action_result.data.\*.\_source.cve.nist.title | string | | CVE-2016-7232 |
-action_result.data.\*.\_source.cve.nist.updated_at.date-time | string | | 2018-10-12T22:14:00+00:00 |
-action_result.data.\*.\_source.cve.nist.updated_at.raw | string | | 2018-10-12T22:14Z |
-action_result.data.\*.\_source.cve.nist.updated_at.timestamp | numeric | | 1539382440 |
-action_result.data.\*.\_source.cve.nist.vulnerability_types | string | | CWE-20 |
-action_result.data.\*.\_source.cve.title | string | | CVE-2016-7232 |
-action_result.data.\*.\_source.cvv | numeric | | 285 |
-action_result.data.\*.\_source.deleted | boolean | | True False |
-action_result.data.\*.\_source.disable_correlation | boolean | | True False |
-action_result.data.\*.\_source.distribution | string | | 5 |
-action_result.data.\*.\_source.domain | string | `fp attribute value` `domain` | domain.com |
-action_result.data.\*.\_source.email | string | `fp attribute value` `email` | user.name@domain.com |
-action_result.data.\*.\_source.email_domain | string | `fp attribute value` `domain` | testdomainlink.ax.xb |
-action_result.data.\*.\_source.enrichments.domains | string | `fp attribute value` `domain` | change-or-fall-behind.html |
-action_result.data.\*.\_source.enrichments.hashtags | string | | #HASHTAG |
-action_result.data.\*.\_source.enrichments.language | string | | en |
-action_result.data.\*.\_source.enrichments.links.\*.href | string | `url` | http://testdomainlink.com/test |
-action_result.data.\*.\_source.enrichments.social_media_handles | string | | @69 |
-action_result.data.\*.\_source.expiration | string | | 06/2024 |
-action_result.data.\*.\_source.expires_at.date-time | string | | 1970-01-01T22:00:00+00:00 |
-action_result.data.\*.\_source.expires_at.raw | string | | Never |
-action_result.data.\*.\_source.expires_at.timestamp | numeric | | 180 |
+action_result.data.\*.\_source.domain | string | `flashpoint ioc value` `domain` | domain.com |
+action_result.data.\*.\_source.email | string | `email` | user.name@domain.com |
 action_result.data.\*.\_source.extraction_id | string | | tXfm1PGDXRqTmcB57L9-eA |
 action_result.data.\*.\_source.extraction_record_id | string | | dhaaFUx8X4G229qg67jrtA |
 action_result.data.\*.\_source.first_observed_at.date-time | string | | 2019-05-24T18:11:15Z |
-action_result.data.\*.\_source.first_observed_at.raw | string | | 2019-05-24T18:11:15Z |
 action_result.data.\*.\_source.first_observed_at.timestamp | numeric | | 1558721475 |
 action_result.data.\*.\_source.fpid | string | | 8dKFsRoeV0mP8zOY1uYcLQ |
-action_result.data.\*.\_source.has_credit_card | boolean | | True False |
-action_result.data.\*.\_source.has_email_access | boolean | | True False |
-action_result.data.\*._source.header_.collected_fpid | string | | pXpjocaLQ8u72VAtHZXrKQ |
 action_result.data.\*._source.header_.indexed_at | numeric | | 1571442668 |
-action_result.data.\*._source.header_.ingested_at | numeric | | 1519149743 |
-action_result.data.\*._source.header_.is_visible | boolean | | True False |
-action_result.data.\*._source.header_.observed_at | numeric | | 1552989386 |
-action_result.data.\*._source.header_.source | string | `url` | https://testdomainlink.org/thread/1234.json |
-action_result.data.\*._source.header_.source_fpid | string | | bGWFKCynXQSmEgWy4nPYtQ |
-action_result.data.\*._source.header_.source_keyword | string | | pastebin 4chan |
-action_result.data.\*._source.header_.source_uri | string | | https://testdomainlink.com/posts/1234 |
-action_result.data.\*.\_source.id | string | | 33925 |
-action_result.data.\*.\_source.is_cvv_available | boolean | | True False |
-action_result.data.\*.\_source.is_deleted | boolean | | True False |
-action_result.data.\*.\_source.is_edited | boolean | | True False |
+action_result.data.\*._source.header_.pipeline_duration | numeric | | 63795317250 |
+action_result.data.\*.\_source.heuristics.heuristics_version | string | | 2.18.0 |
+action_result.data.\*.\_source.heuristics.probable_enterprise_host | boolean | | False |
+action_result.data.\*.\_source.infected_host_attributes.fpid | string | | VbMzgQ-uVImWVbPNtoQamA |
+action_result.data.\*.\_source.infected_host_attributes.host_id | string | | 0123456789ABCDEF0123456789ABCDEF |
+action_result.data.\*.\_source.infected_host_attributes.installed_software.\*.name | string | | Windows Defender |
+action_result.data.\*.\_source.infected_host_attributes.installed_software.\*.version | string | | 3.60.45.0 |
+action_result.data.\*.\_source.infected_host_attributes.ip | string | | 203.0.113.10 |
+action_result.data.\*.\_source.infected_host_attributes.ipv4 | string | | 203.0.113.10 |
+action_result.data.\*.\_source.infected_host_attributes.isp.autonomous_system_number | numeric | | 3329 |
+action_result.data.\*.\_source.infected_host_attributes.isp.autonomous_system_organization | string | | Vodafone-panafon Hellenic Telecommunications Company SA |
+action_result.data.\*.\_source.infected_host_attributes.isp.connection_type | string | | Cellular |
+action_result.data.\*.\_source.infected_host_attributes.isp.isp | string | | Vodafone Greece |
+action_result.data.\*.\_source.infected_host_attributes.isp.organization | string | | Vodafone Greece |
+action_result.data.\*.\_source.infected_host_attributes.location.accuracy_radius | numeric | | 100 |
+action_result.data.\*.\_source.infected_host_attributes.location.city_name | string | | Springfield |
+action_result.data.\*.\_source.infected_host_attributes.location.continent_name | string | | North America |
+action_result.data.\*.\_source.infected_host_attributes.location.country_name | string | | United States |
+action_result.data.\*.\_source.infected_host_attributes.location.latitude | numeric | | 37.751 |
+action_result.data.\*.\_source.infected_host_attributes.location.location.lat | numeric | | 37.751 |
+action_result.data.\*.\_source.infected_host_attributes.location.location.lon | numeric | | -97.822 |
+action_result.data.\*.\_source.infected_host_attributes.location.longitude | numeric | | -97.822 |
+action_result.data.\*.\_source.infected_host_attributes.location.subdivision_1_name | string | | Example Region |
+action_result.data.\*.\_source.infected_host_attributes.location.subdivision_2_name | string | | Springfield |
+action_result.data.\*.\_source.infected_host_attributes.machine.architecture | string | | x64 |
+action_result.data.\*.\_source.infected_host_attributes.machine.cpu.\* | string | | Intel(R) Core(TM) i7 CPU 930 @ 2.80GHz, 4 Cores |
+action_result.data.\*.\_source.infected_host_attributes.machine.extra.\*.key | string | | filelocation |
+action_result.data.\*.\_source.infected_host_attributes.machine.extra.\*.value | string | | C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\MsBuild.exe |
+action_result.data.\*.\_source.infected_host_attributes.machine.gpu.\* | string | | NVIDIA GeForce GTX 260 |
+action_result.data.\*.\_source.infected_host_attributes.machine.language.\* | string | | English |
+action_result.data.\*.\_source.infected_host_attributes.machine.os | string | | Windows 10 Pro x64 |
+action_result.data.\*.\_source.infected_host_attributes.machine.ram | string | | 8190.49 Mb |
+action_result.data.\*.\_source.infected_host_attributes.machine.resolution | string | | {Width=1536, Height=864} |
+action_result.data.\*.\_source.infected_host_attributes.machine.user | string | | user01 |
+action_result.data.\*.\_source.infected_host_attributes.malware.family | string | | redline_stealer |
+action_result.data.\*.\_source.infected_host_attributes.malware.scanned_at.date-time | string | | 2024-03-26T03:24:15Z |
+action_result.data.\*.\_source.infected_host_attributes.malware.version | string | `url` | https://t.me/+uuz8-qLUNeU2ZmI0 |
 action_result.data.\*.\_source.is_fresh | boolean | | True False |
-action_result.data.\*.\_source.is_media | boolean | | True False |
-action_result.data.\*.\_source.is_pin_available | boolean | | True False |
-action_result.data.\*.\_source.is_track1_available | boolean | | True False |
-action_result.data.\*.\_source.is_verified | boolean | | True False |
-action_result.data.\*.\_source.is_verified_by_visa | boolean | | True False |
-action_result.data.\*.\_source.last4 | string | | 442 |
-action_result.data.\*.\_source.last_checked_at.date-time | string | | 2020-02-29T00:00:00+00:00 |
-action_result.data.\*.\_source.last_checked_at.raw | string | | 29-02-2020 |
-action_result.data.\*.\_source.last_checked_at.timestamp | numeric | | 1582934400 |
 action_result.data.\*.\_source.last_observed_at.date-time | string | | 2019-10-18T23:51:05+00:00 |
-action_result.data.\*.\_source.last_observed_at.raw | string | | 1571442665.596432 |
 action_result.data.\*.\_source.last_observed_at.timestamp | numeric | | 1571442665 |
-action_result.data.\*.\_source.legacy_fpid | string | | Rh_TO57eVzutV_uAW-kcGw |
-action_result.data.\*.\_source.level | string | | Platinum |
-action_result.data.\*.\_source.location.country.abbreviation | string | | US |
-action_result.data.\*.\_source.location.country.full_name | string | | Country Name |
-action_result.data.\*.\_source.media.author | string | `url` | Author |
-action_result.data.\*.\_source.media.basetypes | string | | media |
-action_result.data.\*.\_source.media.body.raw | string | | https://testdomainlink.com/test |
-action_result.data.\*.\_source.media.created_at.date-time | string | | 2018-12-30T10:26:04+00:00 |
-action_result.data.\*.\_source.media.created_at.raw | string | | 2018-12-30 10:26:04+00:00 |
-action_result.data.\*.\_source.media.created_at.timestamp | numeric | | 1546165564 |
-action_result.data.\*.\_source.media.description | string | | description |
-action_result.data.\*.\_source.media.filename | string | | test.mp3 |
-action_result.data.\*.\_source.media.fpid | string | | BdSDO5vKV2StpBbHvfJIKQ |
-action_result.data.\*.\_source.media.last_observed_at.date-time | string | | 2019-01-08T14:37:36+00:00 |
-action_result.data.\*.\_source.media.last_observed_at.raw | string | | 1546958256 |
-action_result.data.\*.\_source.media.last_observed_at.timestamp | numeric | | 1546958256 |
-action_result.data.\*.\_source.media.mime_type | string | | image/webp |
-action_result.data.\*.\_source.media.native_id | string | | unknown_id |
-action_result.data.\*.\_source.media.phash | string | | c03e3f553fc29ac0 |
-action_result.data.\*.\_source.media.sha1 | string | `fp attribute value` `sha1` | c4d73272dccaa140f3001bb46043439315de733a |
-action_result.data.\*.\_source.media.site.created_at.date-time | string | | 2016-10-24T14:04:35 |
-action_result.data.\*.\_source.media.site.description.raw | string | | The Test Site Description |
-action_result.data.\*.\_source.media.site.fpid | string | | PKA2rDMoWSCQk2uFD_gzaA |
-action_result.data.\*.\_source.media.site.site_type | string | | Site Type |
-action_result.data.\*.\_source.media.site.source_uri | string | | web.testdomainlink.org |
-action_result.data.\*.\_source.media.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.media.site.tags.\*.parent_tag.name | string | | Parent Tag Name |
-action_result.data.\*.\_source.media.site.title | string | | Site Title |
-action_result.data.\*.\_source.media.site.updated_at.date-time | string | | 2018-12-18T22:03:20 |
-action_result.data.\*.\_source.media.size | numeric | | 13824 |
-action_result.data.\*.\_source.media.source_uri | string | | urn:fp:resource:qualified:conversation:chat:telegram:media:unknown_id |
-action_result.data.\*.\_source.media.storage_uri | string | | xs://testdomainlink/ab123.jpg |
-action_result.data.\*.\_source.media.title | string | | title |
-action_result.data.\*.\_source.media.type | string | | document |
-action_result.data.\*.\_source.message_count.count | numeric | | 56765 |
-action_result.data.\*.\_source.message_count.first_resource.container.fpid | string | | oCV-K3_yU2KPmdvyNhw4HA |
-action_result.data.\*.\_source.message_count.first_resource.created_at.date-time | string | | 2017-01-20T17:46:08+00:00 |
-action_result.data.\*.\_source.message_count.first_resource.first_observed_at.date-time | string | | 2018-04-22T12:18:56.127552+00:00 |
-action_result.data.\*.\_source.message_count.first_resource.fpid | string | | gWSgwUHzV6exZYPVd-prsA |
-action_result.data.\*.\_source.message_count.first_resource.site_actor.fpid | string | | KHXTQDjDWe6qk2t7cZGYbw |
-action_result.data.\*.\_source.message_count.first_resource.site_actor.names.handle | string | | Emu |
-action_result.data.\*.\_source.message_count.first_resource.site_actor.native_id | string | | 633735-emu |
-action_result.data.\*.\_source.message_count.last_resource.container.container.first_observed_at.date-time | string | | 2015-11-17T18:59:58.384479+00:00 |
-action_result.data.\*.\_source.message_count.last_resource.container.container.first_observed_at.raw | string | | 2015-11-17 18:59:58.384479+00:00 |
-action_result.data.\*.\_source.message_count.last_resource.container.container.first_observed_at.timestamp | numeric | | 1447786798 |
-action_result.data.\*.\_source.message_count.last_resource.container.container.fpid | string | | 3tFp3L-qVEaiS3w60OY5cg |
-action_result.data.\*.\_source.message_count.last_resource.container.container.last_observed_at.date-time | string | | 2018-09-27T06:14:27.770185+00:00 |
-action_result.data.\*.\_source.message_count.last_resource.container.container.last_observed_at.raw | string | | 2018-09-27 06:14:27.770185+00:00 |
-action_result.data.\*.\_source.message_count.last_resource.container.container.last_observed_at.timestamp | numeric | | 1538028867 |
-action_result.data.\*.\_source.message_count.last_resource.container.container.legacy_fpid | string | | LL09S4ejV1KIyEol2WulKg |
-action_result.data.\*.\_source.message_count.last_resource.container.container.native_id | string | | 66-example |
-action_result.data.\*.\_source.message_count.last_resource.container.container.source_uri | string | | https://www.testdomainlink.com/test |
-action_result.data.\*.\_source.message_count.last_resource.container.container.title | string | | Test Title |
-action_result.data.\*.\_source.message_count.last_resource.container.fpid | string | | oCV-K3_yU2KPmdvyNhw4HA |
-action_result.data.\*.\_source.message_count.last_resource.container.legacy_fpid | string | | h0eTQng6VsOj96P53w4siA |
-action_result.data.\*.\_source.message_count.last_resource.container.native_id | string | | 215544-2440x-oce-accounts-emu-style |
-action_result.data.\*.\_source.message_count.last_resource.container.source_uri | string | | https://www.testdomainlink.com/test |
-action_result.data.\*.\_source.message_count.last_resource.container.title | string | | 2440x OCE accounts, Emu style |
-action_result.data.\*.\_source.message_count.last_resource.created_at.date-time | string | | 2017-10-22T08:34:39+00:00 |
-action_result.data.\*.\_source.message_count.last_resource.first_observed_at.date-time | string | | 2018-04-22T12:21:44.708966+00:00 |
-action_result.data.\*.\_source.message_count.last_resource.fpid | string | | dp8jDkN0WOCq0cSck8syIA |
-action_result.data.\*.\_source.message_count.last_resource.site.created_at.date-time | string | | 2016-11-15T17:57:00 |
-action_result.data.\*.\_source.message_count.last_resource.site.description.raw | string | | This is an example description |
-action_result.data.\*.\_source.message_count.last_resource.site.fpid | string | | vPX7DFoGWC-AOiA5qvBzlA |
-action_result.data.\*.\_source.message_count.last_resource.site.legacy_fpid | string | | D11tFq1XWKyAyxWTwScsHQ |
-action_result.data.\*.\_source.message_count.last_resource.site.site_type | string | | Forum |
-action_result.data.\*.\_source.message_count.last_resource.site.source_uri | string | | www.testdomainlink.com |
-action_result.data.\*.\_source.message_count.last_resource.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.message_count.last_resource.site.tags.\*.parent_tag.name | string | | Parent Tag Name |
-action_result.data.\*.\_source.message_count.last_resource.site.title | string | | Site Title |
-action_result.data.\*.\_source.message_count.last_resource.site.updated_at.date-time | string | | 2018-09-21T23:57:26 |
-action_result.data.\*.\_source.message_count.last_resource.site_actor.fpid | string | | 5lauqgEyXjmm-EZbwSOUvQ |
-action_result.data.\*.\_source.message_count.last_resource.site_actor.names.handle | string | | mantq |
-action_result.data.\*.\_source.message_count.last_resource.site_actor.native_id | string | | 1195854-mantq |
-action_result.data.\*.\_source.mitre.basetypes | string | | mitre |
-action_result.data.\*.\_source.mitre.body.enrichments.cves | string | | CVE-2019-14743 |
-action_result.data.\*.\_source.mitre.body.enrichments.links.\*.href | string | `url` `ip` | https://schemas.testdomainlink.com/2017/resource/collections/database_row.json |
-action_result.data.\*.\_source.mitre.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.mitre.body.text/html-sanitized | string | | This is a test body text/html-sanitized |
-action_result.data.\*.\_source.mitre.body.text/plain | string | | This is a test body test/plain |
-action_result.data.\*.\_source.mitre.created_at.date-time | string | | 2019-04-03T00:00:00+00:00 |
-action_result.data.\*.\_source.mitre.created_at.raw | string | | 20190403 |
-action_result.data.\*.\_source.mitre.created_at.timestamp | numeric | | 1554249600 |
-action_result.data.\*.\_source.mitre.fpid | string | | DoJqrFGjX7GZL3GzCIKiZw |
-action_result.data.\*.\_source.mitre.last_observed_at.date-time | string | | 2020-03-02T19:00:02+00:00 |
-action_result.data.\*.\_source.mitre.last_observed_at.raw | string | | 2020-03-02T19:00:02 |
-action_result.data.\*.\_source.mitre.last_observed_at.timestamp | numeric | | 1583175602 |
-action_result.data.\*.\_source.mitre.native_id | string | | [28355, 'CVE-2019-10802'] |
-action_result.data.\*.\_source.mitre.phase | string | | Assigned (20190403) |
-action_result.data.\*.\_source.mitre.site.base_uris | string | `url` | http://mitre.org |
-action_result.data.\*.\_source.mitre.site.basetypes | string | | site |
-action_result.data.\*.\_source.mitre.site.created_at.date-time | string | | 2019-02-14T17:21:27.064334 |
-action_result.data.\*.\_source.mitre.site.description.raw | string | | This is a test description |
-action_result.data.\*.\_source.mitre.site.fpid | string | | YJKOYduNWE2PVi1WiTEMOg |
-action_result.data.\*.\_source.mitre.site.site_type | string | | Site Type |
-action_result.data.\*.\_source.mitre.site.source_uri | string | | testdomainlink.org |
-action_result.data.\*.\_source.mitre.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.mitre.site.tags.\*.parent_tag.name | string | | Parent Tag Name |
-action_result.data.\*.\_source.mitre.site.title | string | | Site Title |
-action_result.data.\*.\_source.mitre.site.updated_at.date-time | string | | 2019-02-14T17:26:05.741343 |
-action_result.data.\*.\_source.mitre.status | string | | Candidate |
-action_result.data.\*.\_source.mitre.title | string | | CVE-2019-10802 |
-action_result.data.\*.\_source.native_id | string | `md5` | 378494454 [28356, 'CVE-2016-7232'] |
 action_result.data.\*.\_source.new_records | numeric | | 0 |
-action_result.data.\*.\_source.nist.assigner | string | `email` | cve@testdomainlink.org |
-action_result.data.\*.\_source.nist.basetypes | string | | nist |
-action_result.data.\*.\_source.nist.body.enrichments.cves | string | | CVE-2019-14743 |
-action_result.data.\*.\_source.nist.body.enrichments.links.\*.href | string | `url` `ip` | https://schemas.testdomainlink.com/2017/resource/collections/database_row.json |
-action_result.data.\*.\_source.nist.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.nist.body.text/html-sanitized | string | | This is a test body test/html-sanitized |
-action_result.data.\*.\_source.nist.body.text/plain | string | | This is a test body test/plain |
-action_result.data.\*.\_source.nist.configurations.\*.cpe23_uri | string | | cpe:2.3:o:grandstream:gwn7610_firmware:\*:\*:\*:\*:\*:\*:\*:\* |
-action_result.data.\*.\_source.nist.configurations.\*.version_end_including | string | `ip` | 11.2 |
-action_result.data.\*.\_source.nist.created_at.date-time | string | | 2019-03-30T17:29:00+00:00 |
-action_result.data.\*.\_source.nist.created_at.raw | string | | 2019-03-30T17:29Z |
-action_result.data.\*.\_source.nist.created_at.timestamp | numeric | | 1553966940 |
-action_result.data.\*.\_source.nist.cvssv2.access_complexity | string | | LOW |
-action_result.data.\*.\_source.nist.cvssv2.access_vector | string | | NETWORK |
-action_result.data.\*.\_source.nist.cvssv2.authentication | string | | SINGLE |
-action_result.data.\*.\_source.nist.cvssv2.availability_impact | string | | NONE |
-action_result.data.\*.\_source.nist.cvssv2.base_score | numeric | | 4 |
-action_result.data.\*.\_source.nist.cvssv2.confidentiality_impact | string | | PARTIAL |
-action_result.data.\*.\_source.nist.cvssv2.exploitability_score | numeric | | 8 |
-action_result.data.\*.\_source.nist.cvssv2.impact_score | numeric | | 2.9 |
-action_result.data.\*.\_source.nist.cvssv2.integrity_impact | string | | NONE |
-action_result.data.\*.\_source.nist.cvssv2.severity | string | | MEDIUM |
-action_result.data.\*.\_source.nist.cvssv2.vector_string | string | | AV:N/AC:L/Au:S/C:P/I:N/A:N |
-action_result.data.\*.\_source.nist.cvssv3.attack_complexity | string | | LOW |
-action_result.data.\*.\_source.nist.cvssv3.attack_vector | string | | NETWORK |
-action_result.data.\*.\_source.nist.cvssv3.availability_impact | string | | NONE |
-action_result.data.\*.\_source.nist.cvssv3.base_score | numeric | | 6.5 |
-action_result.data.\*.\_source.nist.cvssv3.confidentiality_impact | string | | HIGH |
-action_result.data.\*.\_source.nist.cvssv3.exploitability_score | numeric | | 2.8 |
-action_result.data.\*.\_source.nist.cvssv3.impact_score | numeric | | 3.6 |
-action_result.data.\*.\_source.nist.cvssv3.integrity_impact | string | | NONE |
-action_result.data.\*.\_source.nist.cvssv3.privileges_required | string | | LOW |
-action_result.data.\*.\_source.nist.cvssv3.scope | string | | UNCHANGED |
-action_result.data.\*.\_source.nist.cvssv3.severity | string | | MEDIUM |
-action_result.data.\*.\_source.nist.cvssv3.user_interaction | string | | NONE |
-action_result.data.\*.\_source.nist.cvssv3.vector_string | string | | CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N |
-action_result.data.\*.\_source.nist.fpid | string | | O42mIpMpVIycfzwmBkoPCA |
-action_result.data.\*.\_source.nist.last_observed_at.date-time | string | | 2020-02-24T19:00:02+00:00 |
-action_result.data.\*.\_source.nist.last_observed_at.raw | string | | 2020-02-24T19:00:02 |
-action_result.data.\*.\_source.nist.last_observed_at.timestamp | numeric | | 1582570802 |
-action_result.data.\*.\_source.nist.native_id | string | | [28350, 'CVE-2019-10657'] |
-action_result.data.\*.\_source.nist.products.\*.product_name | string | | gwn7000_firmware |
-action_result.data.\*.\_source.nist.products.\*.vendor_name | string | | testname |
-action_result.data.\*.\_source.nist.references.\*.name | string | `url` | https://testdomainlink.com/test |
-action_result.data.\*.\_source.nist.references.\*.refsource | string | | MISC |
-action_result.data.\*.\_source.nist.references.\*.tags | string | | Refernece Tags |
-action_result.data.\*.\_source.nist.references.\*.url | string | `fp attribute value` `url` | https://testdomainlink.com/test |
-action_result.data.\*.\_source.nist.site.base_uris | string | `url` | http://testdomainlink.com |
-action_result.data.\*.\_source.nist.site.basetypes | string | | site |
-action_result.data.\*.\_source.nist.site.created_at.date-time | string | | 2019-02-14T16:51:17.949358 |
-action_result.data.\*.\_source.nist.site.description.raw | string | | This is a test description. |
-action_result.data.\*.\_source.nist.site.fpid | string | | IPp5rJZgXhuvZYu2PXMW3Q |
-action_result.data.\*.\_source.nist.site.site_type | string | | Site Type |
-action_result.data.\*.\_source.nist.site.source_uri | string | | testdomainlink.com |
-action_result.data.\*.\_source.nist.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.nist.site.title | string | | Site Title |
-action_result.data.\*.\_source.nist.site.updated_at.date-time | string | | 2019-02-14T16:51:18.230655 |
-action_result.data.\*.\_source.nist.title | string | | CVE-2019-10657 |
-action_result.data.\*.\_source.nist.updated_at.date-time | string | | 2019-04-12T18:29:00+00:00 |
-action_result.data.\*.\_source.nist.updated_at.raw | string | | 2019-04-12T18:29Z |
-action_result.data.\*.\_source.nist.updated_at.timestamp | numeric | | 1555093740 |
-action_result.data.\*.\_source.nist.vulnerability_types | string | | CWE-264 |
-action_result.data.\*.\_source.num_replies | numeric | | 1 |
-action_result.data.\*.\_source.object_id | string | | 0 |
-action_result.data.\*.\_source.object_relation | string | | |
 action_result.data.\*.\_source.old_records | numeric | | 0 |
-action_result.data.\*.\_source.parent_comment.native_id | string | | 209360561 |
-action_result.data.\*.\_source.parent_comment.site.behavior | string | | replace |
-action_result.data.\*.\_source.parent_comment.site.href | string | | urn:fp:type:resource.qualified.site:Ra2dBSXnXjKqoLS7wJPWgw |
-action_result.data.\*.\_source.parent_comment.site.target | string | | $.site |
-action_result.data.\*.\_source.parent_comment.type | string | | parent_comment |
-action_result.data.\*.\_source.parent_message.basetypes | string | | message |
-action_result.data.\*.\_source.parent_message.fpid | string | | 1IIVq-rPXIG7LdX3FFauuw |
-action_result.data.\*.\_source.parent_message.native_id | string | `url` | etrmp5y |
-action_result.data.\*.\_source.parent_message.num_replies | numeric | | 3 |
-action_result.data.\*.\_source.parent_message.site_actor.avatar_uri.href | string | | https://testdomainlink.com/media/user/ab-1234.jpeg |
-action_result.data.\*.\_source.parent_message.site_actor.fpid | string | | e7xy1LSvVHaDEj_jTDmL0g |
-action_result.data.\*.\_source.parent_message.site_actor.names.handle | string | | Test Handle |
-action_result.data.\*.\_source.parent_message.site_actor.native_id | string | | text1234 |
-action_result.data.\*.\_source.parent_message.site_actor.url | string | `fp attribute value` `url` | https://testdomainlink.com/test1234 |
-action_result.data.\*.\_source.parent_message.type | string | | parent_message |
-action_result.data.\*.\_source.password | string | | ya29.GlsrBvzMY9_HL-d7nCA0jlgC0cFUnTtpzrHU94xGiY0OM_sS-0nExZ9y-xWMapu7QKmAml3xkbi4wqE9e58D7XoZ8rF8qYbDNTTEqX4B7X1DMIBzmhT2LcLHpfq4 |
+action_result.data.\*.\_source.password | string | | thisapassword |
 action_result.data.\*.\_source.password_complexity.has_lowercase | boolean | | True False |
 action_result.data.\*.\_source.password_complexity.has_number | boolean | | True False |
 action_result.data.\*.\_source.password_complexity.has_symbol | boolean | | True False |
 action_result.data.\*.\_source.password_complexity.has_uppercase | boolean | | True False |
 action_result.data.\*.\_source.password_complexity.length | numeric | | 129 |
-action_result.data.\*.\_source.password_complexity.probable_hash_algorithms | string | | bcrypt |
-action_result.data.\*.\_source.payment_method | string | | credit |
-action_result.data.\*.\_source.previous_message | string | | 206826987 |
-action_result.data.\*.\_source.prices.\*.currency.abbreviation | string | | $ |
-action_result.data.\*.\_source.prices.\*.currency.raw | string | | $ |
-action_result.data.\*.\_source.prices.\*.raw | string | | $5 300 EUR (0.038673 BTC) |
-action_result.data.\*.\_source.prices.\*.value | numeric | | 3 15 |
-action_result.data.\*.\_source.quantity.available.raw | string | | more than 25 pcs in stock |
-action_result.data.\*.\_source.quantity.sold.raw | string | | 20 sold since May 7, 2015 |
-action_result.data.\*.\_source.raw_href | string | `url` | http://testdomainlink.com/ab1cd234 |
-action_result.data.\*.\_source.reputation.number_of_downvotes | numeric | | 4 |
-action_result.data.\*.\_source.reputation.number_of_upvotes | numeric | | 5 |
-action_result.data.\*.\_source.reputation.score | string | | 1 |
-action_result.data.\*.\_source.resource_fpid | string | | cVDJlMvXVYeuBT_QTBe_Hg |
-action_result.data.\*.\_source.room_count.count | numeric | | 10 |
-action_result.data.\*.\_source.service_code | numeric | | 201 |
-action_result.data.\*.\_source.sharing_group_id | string | | 0 |
-action_result.data.\*.\_source.shipping.\*.raw | string | | Test Shipping ( Croatia, Australia, New Zealand, Cambodia, South Africa) |
-action_result.data.\*.\_source.ships_from | string | | Finland |
-action_result.data.\*.\_source.ships_to | string | | Worldwide |
-action_result.data.\*.\_source.site.base_uris | string | `url` | https://testdomainlink.link |
-action_result.data.\*.\_source.site.basetypes | string | | site |
-action_result.data.\*.\_source.site.created_at.date-time | string | | 2016-10-19T20:57:50.738121 |
-action_result.data.\*.\_source.site.description.raw | string | | This is an example description |
-action_result.data.\*.\_source.site.fpid | string | | EGxvMDp8VBeqjYc0jkKbeg |
-action_result.data.\*.\_source.site.is_deleted | boolean | | True False |
-action_result.data.\*.\_source.site.legacy_fpid | string | | HOJ9wN7rXFm6HaWp-xGcow |
-action_result.data.\*.\_source.site.site_type | string | | Card Shop |
-action_result.data.\*.\_source.site.source_uri | string | | testdomainlink.com |
-action_result.data.\*.\_source.site.tags.\*.name | string | | Carding Security |
-action_result.data.\*.\_source.site.tags.\*.parent_tag.name | string | | Parent Tag Name |
-action_result.data.\*.\_source.site.title | string | | Site Title |
-action_result.data.\*.\_source.site.type | string | | test service |
-action_result.data.\*.\_source.site.updated_at.date-time | string | | 2019-09-24T17:54:21.503860 2019-05-28T15:25:06 |
-action_result.data.\*.\_source.site_actor.\_header.collected_fpid | string | | vreB-nCASfukTGsj6OdU_A |
-action_result.data.\*.\_source.site_actor.\_header.observed_at | numeric | | 1575671142 |
-action_result.data.\*.\_source.site_actor.activity.name | string | | Custom Status |
-action_result.data.\*.\_source.site_actor.activity.type | numeric | | 4 |
-action_result.data.\*.\_source.site_actor.avatar_uri.href | string | `url` | https://testdomainlink.com/img/example123.gif |
-action_result.data.\*.\_source.site_actor.avatar_url | string | | https://testdomainlink.com/avatars/test/123ab.webp?size=1024 |
-action_result.data.\*.\_source.site_actor.basetypes | string | | site_actor user |
-action_result.data.\*.\_source.site_actor.body.enrichments.language | string | | en |
-action_result.data.\*.\_source.site_actor.body.enrichments.links.\*.href | string | | https://testdomainlink.com/test |
-action_result.data.\*.\_source.site_actor.body.raw | string | | <p>"This is a test body"<br /><br /><a href="https://testdomainlink.com/test" class="mention hashtag" rel="tag">#<span>Test</span></a></p> |
-action_result.data.\*.\_source.site_actor.body.text/html+sanitized | string | | <p>"This is a test body text/html+sanitized"<br> (https://testdomainlink.com/test) #Test</p> |
-action_result.data.\*.\_source.site_actor.body.text/plain | string | | "This is a test body test/plain" #Test |
-action_result.data.\*.\_source.site_actor.bot | boolean | | True False |
-action_result.data.\*.\_source.site_actor.comment_reputation.number_of_upvotes | numeric | | 1071 |
-action_result.data.\*.\_source.site_actor.created_at.date-time | string | | 2016-06-03T00:00:00+00:00 |
-action_result.data.\*.\_source.site_actor.created_at.raw | string | | 2016-06-03 00:00:00+00:00 |
-action_result.data.\*.\_source.site_actor.created_at.timestamp | numeric | | 1464912000 |
-action_result.data.\*.\_source.site_actor.description | string | | Test Description |
-action_result.data.\*.\_source.site_actor.discriminator | string | | 9044 |
-action_result.data.\*.\_source.site_actor.enrichments.language | string | | en |
-action_result.data.\*.\_source.site_actor.enrichments.links.\*.href | string | | https://www.testdomainlink.com/test |
-action_result.data.\*.\_source.site_actor.first_name | string | | first name |
-action_result.data.\*.\_source.site_actor.first_observed_at.date-time | string | | 2014-04-22T21:15:38.417619+00:00 |
-action_result.data.\*.\_source.site_actor.first_observed_at.raw | string | | 2014-04-22 21:15:38.417619+00:00 |
-action_result.data.\*.\_source.site_actor.first_observed_at.timestamp | numeric | | 1398201338 |
-action_result.data.\*.\_source.site_actor.flair.flair_text | string | | flair text |
-action_result.data.\*.\_source.site_actor.fpid | string | | QSRLfKc-VJaqaSIcgAUNiA |
-action_result.data.\*.\_source.site_actor.is_admin | boolean | | True False |
-action_result.data.\*.\_source.site_actor.is_deleted | boolean | | True False |
-action_result.data.\*.\_source.site_actor.is_donor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.is_investor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.is_premium | boolean | | True False |
-action_result.data.\*.\_source.site_actor.is_private | boolean | | True False |
-action_result.data.\*.\_source.site_actor.is_pro | boolean | | True False |
-action_result.data.\*.\_source.site_actor.is_verified | boolean | | True False |
-action_result.data.\*.\_source.site_actor.joined_at.date-time | string | | 2019-12-07T18:49:28.780462+00:00 |
-action_result.data.\*.\_source.site_actor.joined_at.raw | string | | 1575744568.780462 |
-action_result.data.\*.\_source.site_actor.joined_at.timestamp | numeric | | 1575744568 |
-action_result.data.\*.\_source.site_actor.last_active_at.date-time | string | | 2019-07-31T03:23:09+00:00 |
-action_result.data.\*.\_source.site_actor.last_active_at.raw | string | | 2019-07-31 03:23:09+00:00 |
-action_result.data.\*.\_source.site_actor.last_active_at.timestamp | numeric | | 1564543389 |
-action_result.data.\*.\_source.site_actor.last_name | string | | Test Name |
-action_result.data.\*.\_source.site_actor.last_observed_at.date-time | string | | 2019-07-15T02:19:23+00:00 |
-action_result.data.\*.\_source.site_actor.last_observed_at.raw | string | | 1563157163.299181 |
-action_result.data.\*.\_source.site_actor.last_observed_at.timestamp | numeric | | 1563157163 |
-action_result.data.\*.\_source.site_actor.legacy_fpid | string | | 1jLzGo5DX5qNUT5y1dFXrQ |
-action_result.data.\*.\_source.site_actor.name | string | | name |
-action_result.data.\*.\_source.site_actor.names.aliases | string | | aliasname |
-action_result.data.\*.\_source.site_actor.names.handle | string | | name |
-action_result.data.\*.\_source.site_actor.native_id | string | `url` `md5` | testid |
-action_result.data.\*.\_source.site_actor.nick | string | | nick name |
-action_result.data.\*.\_source.site_actor.number_following | numeric | | 1751 |
-action_result.data.\*.\_source.site_actor.number_of_followers | numeric | | 3223 |
-action_result.data.\*.\_source.site_actor.number_of_messages | numeric | | 33486 |
-action_result.data.\*.\_source.site_actor.pgp_key_public | string | | -----BEGIN PGP PUBLIC KEY BLOCK----- PGPxKeyxPublic -----END PGP PUBLIC KEY BLOCK----- |
-action_result.data.\*.\_source.site_actor.post_reputation.number_of_upvotes | numeric | | 1 |
-action_result.data.\*.\_source.site_actor.reputation.count_ratings | string | | 50 |
-action_result.data.\*.\_source.site_actor.reputation.negative_feedback | string | | -1 |
-action_result.data.\*.\_source.site_actor.reputation.positive_feedback | string | | 0 |
-action_result.data.\*.\_source.site_actor.reputation.score | string | | 100 |
-action_result.data.\*.\_source.site_actor.reputation.site_actor_rating | string | | Level 1 |
-action_result.data.\*.\_source.site_actor.roles.\*.id | string | | 276516314170916864 |
-action_result.data.\*.\_source.site_actor.roles.\*.name | string | | @everyone |
-action_result.data.\*.\_source.site_actor.sales.total_transactions | numeric | | 5000 |
-action_result.data.\*.\_source.site_actor.server.created_at.date-time | string | | 2017-02-02T00:57:06.723000+00:00 |
-action_result.data.\*.\_source.site_actor.server.created_at.raw | string | | 1485997026.723 |
-action_result.data.\*.\_source.site_actor.server.created_at.timestamp | numeric | | 1485997026 |
-action_result.data.\*.\_source.site_actor.server.fpid | string | | 1xVN9lLjUPC7SMwbLv_0RQ |
-action_result.data.\*.\_source.site_actor.server.icon_url | string | | https://testdomainlink.com/icons/1234.jpg |
-action_result.data.\*.\_source.site_actor.server.is_deleted | boolean | | True False |
-action_result.data.\*.\_source.site_actor.server.last_observed_at.date-time | string | | 2020-01-08T17:42:10.080020+00:00 |
-action_result.data.\*.\_source.site_actor.server.last_observed_at.raw | string | | 1578505330.08002 |
-action_result.data.\*.\_source.site_actor.server.last_observed_at.timestamp | numeric | | 1578505330 |
-action_result.data.\*.\_source.site_actor.server.name | string | | Super Club Penguin |
-action_result.data.\*.\_source.site_actor.server.native_id | string | | 276516314170916864 |
-action_result.data.\*.\_source.site_actor.server.region | string | | us_central |
-action_result.data.\*.\_source.site_actor.server.server_owner.id | string | | 272944155205042177 |
-action_result.data.\*.\_source.site_actor.server.server_owner.username | string | | Mate#5386 |
-action_result.data.\*.\_source.site_actor.server.site.fpid | string | | 6-JEBtwCWXmpUgPo1ZtoRQ |
-action_result.data.\*.\_source.site_actor.server.site.is_deleted | boolean | | True False |
-action_result.data.\*.\_source.site_actor.server.site.site_type | string | | Site Type |
-action_result.data.\*.\_source.site_actor.server.site.source_uri | string | | urn:fp:resource:qualified:site:27891 |
-action_result.data.\*.\_source.site_actor.server.site.title | string | | Site Title |
-action_result.data.\*.\_source.site_actor.server.source_uri | string | | urn:fp:resource:qualified:conversation:chat:discord:server:276516314170916864 |
-action_result.data.\*.\_source.site_actor.server.title | string | | Server Title |
-action_result.data.\*.\_source.site_actor.server.verification_level | string | | 4 |
-action_result.data.\*.\_source.site_actor.site_actor.\_header.collected_fpid | string | | RK6nDJJbRAmmInesId8lqA |
-action_result.data.\*.\_source.site_actor.site_actor.\_header.observed_at | numeric | | 1559420203 |
-action_result.data.\*.\_source.site_actor.site_actor.avatar_uri.href | string | | https://testdomainlink.com/media/user/1234.jpg |
-action_result.data.\*.\_source.site_actor.site_actor.body.enrichments.language | string | | en |
-action_result.data.\*.\_source.site_actor.site_actor.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.site_actor.site_actor.body.text/html+sanitized | string | | This is a test body text/html+sanitized |
-action_result.data.\*.\_source.site_actor.site_actor.body.text/plain | string | | This is a test body text/plain |
-action_result.data.\*.\_source.site_actor.site_actor.created_at.date-time | string | | 2016-12-01T00:00:00+00:00 |
-action_result.data.\*.\_source.site_actor.site_actor.created_at.raw | string | | December 2016 |
-action_result.data.\*.\_source.site_actor.site_actor.created_at.timestamp | numeric | | 1480550400 |
-action_result.data.\*.\_source.site_actor.site_actor.fpid | string | | eE9alofZWZuS0Ef5HiirIA |
-action_result.data.\*.\_source.site_actor.site_actor.is_donor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.is_investor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.is_premium | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.is_private | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.is_pro | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.is_verified | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.names.handle | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.native_id | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.number_following | numeric | | 2304 |
-action_result.data.\*.\_source.site_actor.site_actor.number_of_followers | numeric | | 1703 |
-action_result.data.\*.\_source.site_actor.site_actor.number_of_messages | numeric | | 9610 |
-action_result.data.\*.\_source.site_actor.site_actor.site.created_at.date-time | string | | 2018-05-03T13:35:05 |
-action_result.data.\*.\_source.site_actor.site_actor.site.description.raw | string | | This is an example description |
-action_result.data.\*.\_source.site_actor.site_actor.site.fpid | string | | \_tI5K2qyXYeqD3rUhkxMzg |
-action_result.data.\*.\_source.site_actor.site_actor.site.site_type | string | | Social Network |
-action_result.data.\*.\_source.site_actor.site_actor.site.source_uri | string | | testdomainlink.com |
-action_result.data.\*.\_source.site_actor.site_actor.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.site_actor.site_actor.site.tags.\*.parent_tag.name | string | | Parent Tag Name |
-action_result.data.\*.\_source.site_actor.site_actor.site.title | string | | Site Title |
-action_result.data.\*.\_source.site_actor.site_actor.site.updated_at.date-time | string | | 2019-03-27T15:59:59 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.\_header.collected_fpid | string | | RK6nDJJbRAmmInesId8lqA |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.\_header.observed_at | numeric | | 1559420203.347195 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.avatar_uri.href | string | | https://testdomainlink.com/media/user/1234.jpg |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.body.enrichments.language | string | | en |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.body.text/html+sanitized | string | | This is a test body text/html+sanitized |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.body.text/plain | string | | This is a test body text/plain |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.created_at.date-time | string | | 2016-12-01T00:00:00+00:00 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.created_at.raw | string | | December 2016 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.created_at.timestamp | numeric | | 1480550400 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.fpid | string | | eE9alofZWZuS0Ef5HiirIA |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.is_donor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.is_investor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.is_premium | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.is_private | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.is_pro | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.is_verified | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.names.handle | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.native_id | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.number_following | numeric | | 2304 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.number_of_followers | numeric | | 1703 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.number_of_messages | numeric | | 9610 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.created_at.date-time | string | | 2018-05-03T13:35:05 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.description.raw | string | | This is an example description. |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.fpid | string | | \_tI5K2qyXYeqD3rUhkxMzg |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.site_type | string | | Social Network |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.source_uri | string | | testdomainlink.com |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.tags.\*.parent_tag.name | string | | Parent Tag Name |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.title | string | | Site Title |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site.updated_at.date-time | string | | 2019-03-27T15:59:59 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.\_header.collected_fpid | string | | RK6nDJJbRAmmInesId8lqA |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.\_header.observed_at | numeric | | 1559420203 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.avatar_uri.href | string | | https://testdomainlink.com/media/user/1234.jpg |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.body.enrichments.language | string | | en |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.body.text/html+sanitized | string | | This is a test body text/html+sanitized |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.body.text/plain | string | | This is a test body text/plain |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.created_at.date-time | string | | 2016-12-01T00:00:00+00:00 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.created_at.raw | string | | December 2016 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.created_at.timestamp | numeric | | 1480550400 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.fpid | string | | eE9alofZWZuS0Ef5HiirIA |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.is_donor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.is_investor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.is_premium | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.is_private | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.is_pro | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.is_verified | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.names.handle | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.native_id | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.number_following | numeric | | 2304 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.number_of_followers | numeric | | 1703 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.number_of_messages | numeric | | 9610 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.created_at.date-time | string | | 2018-05-03T13:35:05 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.description.raw | string | | This is an example description |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.fpid | string | | \_tI5K2qyXYeqD3rUhkxMzg |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.site_type | string | | Social Network |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.source_uri | string | | testdomainlink.com |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.tags.\*.name | string | | Tag Name |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.tags.\*.parent_tag.name | string | | Parent Tag Name |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.title | string | | Site Title |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site.updated_at.date-time | string | | 2019-03-27T15:59:59 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.\_header.collected_fpid | string | | RK6nDJJbRAmmInesId8lqA |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.\_header.observed_at | numeric | | 1559420203 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.avatar_uri.href | string | | https://testdomainlink.com/media/user/1234.jpg |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.body.enrichments.language | string | | en |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.body.raw | string | | This is a test body |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.body.text/html+sanitized | string | | This is a test body text/html+sanitized |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.body.text/plain | string | | This is a test body text/plain |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.created_at.date-time | string | | 2016-12-01T00:00:00+00:00 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.created_at.raw | string | | December 2016 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.created_at.timestamp | numeric | | 1480550400 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.fpid | string | | eE9alofZWZuS0Ef5HiirIA |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.is_donor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.is_investor | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.is_premium | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.is_private | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.is_pro | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.is_verified | boolean | | True False |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.names.handle | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.native_id | string | | dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.number_following | numeric | | 2304 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.number_of_followers | numeric | | 1703 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.number_of_messages | numeric | | 9610 |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.site_actor.source_uri | string | | https://testdomainlink.com/dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.site_actor.source_uri | string | | https://testdomainlink.com/dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.site_actor.source_uri | string | | https://testdomainlink.com/dankemp |
-action_result.data.\*.\_source.site_actor.site_actor.source_uri | string | | https://testdomainlink.com/dankemp |
-action_result.data.\*.\_source.site_actor.source_uri | string | `url` | urn:fp:resource:qualified:conversation:chat:telegram:site_actor:1061080441 |
-action_result.data.\*.\_source.site_actor.title | string | | Test Title |
-action_result.data.\*.\_source.site_actor.type | string | | user |
-action_result.data.\*.\_source.site_actor.url | string | `fp attribute value` `url` | https://testdomainlink.com/user/UniqueUsername642 |
-action_result.data.\*.\_source.site_actor.username | string | `url` `user name` | ABOALZBER2 |
-action_result.data.\*.\_source.site_actor_count.count | numeric | | 6219 |
-action_result.data.\*.\_source.site_actor_count.first_resource.fpid | string | | KHXTQDjDWe6qk2t7cZGYbw |
-action_result.data.\*.\_source.site_actor_count.first_resource.names.handle | string | | Emu |
-action_result.data.\*.\_source.site_actor_count.first_resource.native_id | string | | 633735-emu |
-action_result.data.\*.\_source.site_actor_count.last_resource.fpid | string | | 5lauqgEyXjmm-EZbwSOUvQ |
-action_result.data.\*.\_source.site_actor_count.last_resource.names.handle | string | | mantq |
-action_result.data.\*.\_source.site_actor_count.last_resource.native_id | string | | 1195854-mantq |
-action_result.data.\*.\_source.size.number_of_bytes | numeric | | 31380 |
-action_result.data.\*.\_source.size.raw | string | | 31.38 KB |
+action_result.data.\*.\_source.password_complexity.probable_hash_algorithms.\* | string | | CRC-24 |
 action_result.data.\*.\_source.source | string | `url` | Analyst Research |
 action_result.data.\*.\_source.source_type | string | | Analyst Research |
-action_result.data.\*.\_source.source_uri | string | `url` | https://testdomainlink.com/test |
-action_result.data.\*.\_source.syntax | string | | text |
-action_result.data.\*.\_source.thread.native_id | string | | 209360561 |
-action_result.data.\*.\_source.thread.site.behavior | string | | replace |
-action_result.data.\*.\_source.thread.site.href | string | | urn:fp:type:resource.qualified.site:Ra2dBSXnXjKqoLS7wJPWgw |
-action_result.data.\*.\_source.thread.site.target | string | | $.site |
-action_result.data.\*.\_source.thread.type | string | | thread |
-action_result.data.\*.\_source.thread_count.count | numeric | | 2506 |
 action_result.data.\*.\_source.times_seen | numeric | | 1 |
-action_result.data.\*.\_source.timestamp | string | | 1549413013 |
 action_result.data.\*.\_source.title | string | | CVE-2019-10802 |
-action_result.data.\*.\_source.to_ids | boolean | | True False |
 action_result.data.\*.\_source.top_domains.\*.count | numeric | | 182662 |
 action_result.data.\*.\_source.top_domains.\*.value | string | | testdomainlink.com |
-action_result.data.\*.\_source.top_domains.count | numeric | | 262 |
-action_result.data.\*.\_source.top_domains.value | string | | testdomainlink.com |
 action_result.data.\*.\_source.top_passwords.\*.count | numeric | | 1038 |
 action_result.data.\*.\_source.top_passwords.\*.value | string | `sha1` `email` `md5` | e10adc3949ba59abbe56e057f20f883e |
 action_result.data.\*.\_source.total_records | numeric | | 671072 |
-action_result.data.\*.\_source.track1 | string | | 4147202342565650^LAST/NAME ^2102201148941100000000751000000 |
-action_result.data.\*.\_source.track2 | string | | 4147202342565650=210220114894751 |
-action_result.data.\*.\_source.track_information | string | | TR2 |
-action_result.data.\*.\_source.type | string | | md5 |
 action_result.data.\*.\_source.unique_records | numeric | | 671066 |
-action_result.data.\*.\_source.unique_visits | numeric | | 0 |
-action_result.data.\*.\_source.updated_at.date-time | string | | 2016-11-08T08:00:00+00:00 |
-action_result.data.\*.\_source.updated_at.raw | string | | 2016-11-08T08:00:00 |
-action_result.data.\*.\_source.updated_at.timestamp | numeric | | 1478592000 |
-action_result.data.\*.\_source.url | string | `fp attribute value` `url` | https://www.testdomainlink.com/test |
-action_result.data.\*.\_source.uuid | string | | 5c5a2a95-de34-4b51-8f23-124a0a640c05 |
-action_result.data.\*.\_source.value.attachment | string | `sha256` | 72832db9b951663b8f322778440b8720ea95cde0349a1d26477edd95b3915479 |
-action_result.data.\*.\_source.value.comment | string | `file name` | |
-action_result.data.\*.\_source.value.domain | string | `fp attribute value` `domain` | adsfinder.xyz |
-action_result.data.\*.\_source.value.email-src | string | `fp attribute value` `email` | email@testdomainlink.com |
-action_result.data.\*.\_source.value.ip-dst | string | `fp attribute value` `ip` | 210.122.7.129 |
-action_result.data.\*.\_source.value.ip-dst|port | string | `fp attribute value` | 5.79.68.110|80 |
-action_result.data.\*.\_source.value.link | string | `url` | https://www.testdomainlink.com/test.html |
-action_result.data.\*.\_source.value.md5 | string | `fp attribute value` `md5` | 120862db74f9e202c91466fe93efc50a |
-action_result.data.\*.\_source.value.other | string | | id:wc4XnQq4X-GrNjTP9gFh4g |
-action_result.data.\*.\_source.value.sha1 | string | `fp attribute value` `sha1` | 1489f923c4dca729178b3e3233458550d8dddf29 |
-action_result.data.\*.\_source.value.sha256 | string | `fp attribute value` `sha256` | 32acb0ab5c16e624764f282f84f160984d436c777ad1a41ee8080b50db98e199 |
-action_result.data.\*.\_source.value.url | string | `fp attribute value` `url` | http://ww1.testdomainlink.com/?subid1=1234 |
-action_result.data.\*.\_source.value.x509-fingerprint-sha1 | string | `fp attribute value` `sha1` | 6565a33dd73b11a30a072537c9424a5b767750e1 |
-action_result.data.\*.\_type | string | | \_doc |
+action_result.data.\*.\_source.username | string | | user.name@example.com |
+action_result.data.\*.matched_queries.\* | string | | dat.edm.org.r |
+action_result.data.\*.sort.\* | numeric | | 9223372036854775807 |
 action_result.status | string | | success failed |
 action_result.message | string | | Total results: 478 |
 action_result.summary.total_results | numeric | | 478 |
@@ -1481,7 +1041,7 @@ summary.total_objects_successful | numeric | | 1 |
 
 ## action: 'list indicators'
 
-Fetch a list of IoCs that occur in the context of an event from the Flashpoint Platform
+Fetch a page of the most recent IoCs from the Flashpoint Technical Intelligence v2 API
 
 Type: **investigate** <br>
 Read only: **True**
@@ -1490,197 +1050,59 @@ Read only: **True**
 
 PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
 --------- | -------- | ----------- | ---- | --------
-**attributes_types** | optional | Enable a search by attribute types(allows Comma-separated list) | string | `fp attribute type` |
-**query** | optional | Filter the results based on the field value or free text search | string | `fp attribute value` |
-**limit** | optional | Maximum number of indicators to be fetched (default: 500) | numeric | |
+**ioc_types** | optional | Comma-separated list of IoC types to match (allowed values: domain, extracted_config, file, ipv4, ipv6, url) | string | `fp attribute type` |
+**size** | optional | Maximum number of IoCs to be fetched in one request (default: 10, maximum: 1000, maximum: 500 when 'embed' is provided) | numeric | |
+**from** | optional | Zero-based index of the first IoC to be fetched (default: 0) | numeric | |
+**sort** | optional | Date field and direction used to sort the fetched IoCs (default: last_seen_at:desc) | string | |
+**last_seen_after** | optional | Include IoCs last seen on or after this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d, -8h, +1w) | string | |
 
 #### Action Output
 
 DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
 --------- | ---- | -------- | --------------
-action_result.parameter.attributes_types | string | `fp attribute type` | url domain ip-src ip-dst md5 sha1 sha256 sha512 |
-action_result.parameter.limit | numeric | | 1000 |
-action_result.parameter.query | string | `fp attribute value` | "test text" gandcrab+ransomware category:"Payload Delivery" +value.\\\*:"5.79.68.110|80" +value.url:"http://reborntechnology.co.uk/ups.com/WebTracking/PO-58666526964013/" "http://reborntechnology.co.uk/ups.com/WebTracking/PO-58666526964013/" |
-action_result.data.\*.Attribute.Event.RelatedEvent.\*.Event.fpid | string | | g8L1tzecUgOS6FWvBJrCxA |
-action_result.data.\*.Attribute.Event.RelatedEvent.\*.Event.info | string | | EventInfo |
-action_result.data.\*.Attribute.Event.fpid | string | | zP1UL5zqWf6PxQv8f5OkdA |
-action_result.data.\*.Attribute.Event.href | string | | https://api.flashpoint.io/technical-intelligence/v1/event/zP1UL5zqWf6PxQv8f5OkdA |
-action_result.data.\*.Attribute.Event.info | string | | EventInfo_f59e91ef018b716d525bf7bcf50edbc040321748_2019-06-17T04:01:01.000Z |
-action_result.data.\*.Attribute.Event.timestamp | string | | 1560895664 |
-action_result.data.\*.Attribute.category | string | | Payload delivery |
-action_result.data.\*.Attribute.fpid | string | | tQ3UYKNAUV-iSWQp7s3ppg |
-action_result.data.\*.Attribute.href | string | | https://api.flashpoint.io/technical-intelligence/v1/attribute/tQ3UYKNAUV-iSWQp7s3ppg |
-action_result.data.\*.Attribute.timestamp | string | | 1560895664 |
-action_result.data.\*.Attribute.type | string | `fp attribute type` | md5 |
-action_result.data.\*.Attribute.uuid | string | | c0e430ce-c96a-47ac-aa7d-d90b83bd4fe5 |
-action_result.data.\*.Attribute.value.comment | string | | |
-action_result.data.\*.Attribute.value.md5 | string | `fp attribute value` `md5` | 7444589a147dc4e5b351cc20eadedc22 |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.authors | string | | Davide Arcuri |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.description | string | | This is a test description |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.galaxy_id | string | | 22 |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.meta.external_id | string | | T1022 |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.meta.kill_chain | string | | test-attack:enterprise-attack:exfiltration |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.meta.mitre_data_sources | string | | Process monitoring |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.meta.mitre_platforms | string | | Windows |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.meta.refs | string | `url` | https://www.testdomainlink.com/test.html |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.meta.synonyms | string | | Pandemyia |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.source | string | `url` | https://testdomainlink.com/test |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.tag_id | string | | 163 |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.tag_name | string | | dxsp-xxgh:test-type="Test Attachment - T1193" |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.type | string | | test-type |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.uuid | string | | fb2242d8-1707-11e8-ab20-6fa7448c3640 |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.value | string | | Spearphishing Attachment - T1193 |
-action_result.data.\*.Event.Galaxy.\*.GalaxyCluster.\*.version | string | | 4 |
-action_result.data.\*.Event.Galaxy.\*.description | string | | Test description |
-action_result.data.\*.Event.Galaxy.\*.icon | string | | map |
-action_result.data.\*.Event.Galaxy.\*.name | string | | Test Name |
-action_result.data.\*.Event.Galaxy.\*.namespace | string | | test-namespace |
-action_result.data.\*.Event.Galaxy.\*.type | string | | test-type |
-action_result.data.\*.Event.Galaxy.\*.uuid | string | | fa7016a8-1707-11e8-82d0-1b73d76eb204 |
-action_result.data.\*.Event.Galaxy.\*.version | string | | 4 |
-action_result.data.\*.Event.RelatedEvent.\*.Event.date | string | | 2019-02-11 |
-action_result.data.\*.Event.RelatedEvent.\*.Event.fpid | string | | g8L1tzecUgOS6FWvBJrCxA |
-action_result.data.\*.Event.RelatedEvent.\*.Event.info | string | | DarkHotel |
-action_result.data.\*.Event.RelatedEvent.\*.Event.timestamp | string | | 1549907330 |
-action_result.data.\*.Event.RelatedEvent.\*.Event.uuid | string | | 5c61b582-7d5c-4857-a944-05cc0a640c05 |
-action_result.data.\*.Event.Tag.\*.name | string | `file name` | TagName |
-action_result.data.\*.Event.Tag.\*.numerical_value | string | | |
-action_result.data.\*.Event.Tags | string | | post_date: 2018-09-15 12:07:00 |
-action_result.data.\*.Event.attack_ids | string | | T1022 |
-action_result.data.\*.Event.attribute_count | string | | 1 |
-action_result.data.\*.Event.date | string | | 2019-02-05 |
-action_result.data.\*.Event.event_creator_email | string | `email` | email@testdomainlink.com |
-action_result.data.\*.Event.fpid | string | | zP1UL5zqWf6PxQv8f5OkdA |
-action_result.data.\*.Event.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v1/event/zP1UL5zqWf6PxQv8f5OkdA |
-action_result.data.\*.Event.info | string | | CryptingService_f59e91ef018b716d525bf7bcf50edbc040321748_2019-06-17T04:01:01.000Z |
-action_result.data.\*.Event.publish_timestamp | string | | 1549412790 |
-action_result.data.\*.Event.report | string | `url` | https://fp.tools/home/intelligence/reports/report/E_J_zA_tTamKK61VWvnyxg |
-action_result.data.\*.Event.reports | string | `url` | https://fp.tools/home/intelligence/reports/report/hDeeeDt1TV6r6XtDGVQKcQ |
-action_result.data.\*.Event.timestamp | string | | 1560895664 |
-action_result.data.\*.Event.uuid | string | | 5c5a29b6-1d44-4b67-bcc5-12600a640c05 |
-action_result.data.\*.basetypes | string | `fp query basetypes` | indicator_attribute |
-action_result.data.\*.category | string | | Payload delivery |
-action_result.data.\*.fpid | string | | tQ3UYKNAUV-iSWQp7s3ppg |
-action_result.data.\*.header\_.indexed_at | numeric | | 1560989498 |
-action_result.data.\*.header\_.ingested_at | numeric | | 1560988795 |
-action_result.data.\*.header\_.is_visible | boolean | | True False |
-action_result.data.\*.header\_.observed_at | numeric | | 1560988795 |
-action_result.data.\*.header\_.source | string | | urn:fp:resource:qualified:indicator |
-action_result.data.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v1/attribute/tQ3UYKNAUV-iSWQp7s3ppg |
-action_result.data.\*.timestamp | string | | 1560895664 |
-action_result.data.\*.type | string | `fp attribute type` | md5 |
-action_result.data.\*.uuid | string | | c0e430ce-c96a-47ac-aa7d-d90b83bd4fe5 |
-action_result.data.\*.value.AS | string | `fp attribute value` | AS16276 |
-action_result.data.\*.value.attachment | string | `fp attribute value` | 72832db9b951663b8f322778440b8720ea95cde0349a1d26477edd95b3915479 |
-action_result.data.\*.value.authentihash | string | `fp attribute value` | c50d6e2cf0e6018b5ed8fc3ffea51e0aa5d4bb4e1c027b65ed9a5fff84db9765 |
-action_result.data.\*.value.btc | string | `fp attribute value` | 15HUUDBjLD34XfCu6YtafT7ARSt2TBrLBe |
-action_result.data.\*.value.campaign-name | string | `fp attribute value` | WizardOpium |
-action_result.data.\*.value.comment | string | `url` | |
-action_result.data.\*.value.cookie | string | `fp attribute value` | adwords_02 |
-action_result.data.\*.value.domain | string | `fp attribute value` `domain` | adsfinder.xyz |
-action_result.data.\*.value.email-dst | string | `fp attribute value` `email` | trash023@ambcomission.com |
-action_result.data.\*.value.email-src | string | `fp attribute value` `email` | email@testdomainlink.com |
-action_result.data.\*.value.email-src-display-name | string | `fp attribute value` | Telstra |
-action_result.data.\*.value.email-subject | string | `fp attribute value` | Your Telstra Business Email Bill |
-action_result.data.\*.value.filename | string | `fp attribute value` | secure-ingdirect.top |
-action_result.data.\*.value.first-name | string | `fp attribute value` | Javad |
-action_result.data.\*.value.float | string | `fp attribute value` | 6.1704414228235 |
-action_result.data.\*.value.github-username | string | `fp attribute value` | BlackRouter |
-action_result.data.\*.value.hostname | string | `fp attribute value` | putrr16.com |
-action_result.data.\*.value.imphash | string | `fp attribute value` | a872d0dcbb4472f66f79cb57e73e177d |
-action_result.data.\*.value.ip-dst | string | `fp attribute value` `ip` | 210.122.7.129 |
-action_result.data.\*.value.ip-dst|port | string | `fp attribute value` | 5.79.68.110|80 |
-action_result.data.\*.value.ip-src | string | `fp attribute value` `ip` | 101.55.64.246 |
-action_result.data.\*.value.link | string | `fp attribute value` | https://www.testdomainlink.com/test.html |
-action_result.data.\*.value.malware-sample | string | `fp attribute value` | czicmren.exe|2f17c915610b08fb59c01981ed2594c5 |
-action_result.data.\*.value.md5 | string | `fp attribute value` `md5` | 7444589a147dc4e5b351cc20eadedc22 |
-action_result.data.\*.value.mutex | string | `fp attribute value` | c2hpdHmjcmF6eUBleHBsb2l0Lmlt_NONE_DL |
-action_result.data.\*.value.other | string | `fp attribute value` | id:wc4XnQq4X-GrNjTP9gFh4g |
-action_result.data.\*.value.pattern-in-file | string | `fp attribute value` | D:\\Project\\FoxPanel222\\FoxPanel\\obj\\Debug\\FoxPanel.pdb |
-action_result.data.\*.value.pattern-in-memory | string | `fp attribute value` | %PUBLIC%\\Public\\hUpdated.ps1 |
-action_result.data.\*.value.pdb | string | `fp attribute value` | u:\\SAM\\Servers\\Sam-onion-no-check-lock-file-enc-all-ext\\SAM\\obj\\Release\\MIKOPONI.pdb |
-action_result.data.\*.value.port | string | `fp attribute value` | 443 |
-action_result.data.\*.value.regkey | string | `fp attribute value` | HKEY_CURRENT_USER\\SOFTWARE\\FakeMessage\\FakeMessage |
-action_result.data.\*.value.regkey|value | string | `fp attribute value` | HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run|%APPDATA%\\9bc79ecb-e94e-4db2-bd38-4950445a4f10\\dsl host\\dslhost.exe |
-action_result.data.\*.value.sha1 | string | `fp attribute value` `sha1` | ba6045f30a940efdede47b0c6e3a73d3df7e0bfe |
-action_result.data.\*.value.sha256 | string | `fp attribute value` `sha256` | 32acb0ab5c16e624764f282f84f160984d436c777ad1a41ee8080b50db98e199 |
-action_result.data.\*.value.sha512 | string | `fp attribute value` | ad2f7c7470a9a48faa311d9eb85b1e30686bd553915434eed77e8103986401899a789702ae6af63e00c14195f4c2eb1c4c03c2f92c26bf90ddc293e76dfbee08 |
-action_result.data.\*.value.size-in-bytes | string | `fp attribute value` | Enriched via the stiximport module |
-action_result.data.\*.value.snort | string | `fp attribute value` | alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"FlashPoint DMSniff UserAgent"; flow:established,to_server; content:"DSNF\_"; http_user_agent; classtype:trojan-activity; sid:9000030; rev:1; metadata:author Jason Reaves;) |
-action_result.data.\*.value.ssdeep | string | `fp attribute value` | 3072:pNwZ4j/a2NlHbAoTL4592kHhEBZTWTBfg09ruXlN:pNwZ4zaibAoTL45oMEPWTBp9ruXl |
-action_result.data.\*.value.target-external | string | `fp attribute value` | www.testdomainlink.com |
-action_result.data.\*.value.target-machine | string | `fp attribute value` | 103.205.134.74 |
-action_result.data.\*.value.target-org | string | `fp attribute value` | Norsk Hydro ASA |
-action_result.data.\*.value.text | string | `fp attribute value` | %TEMP%\\8112.tmp reads from %WINDIR%\\system32\\lsass.exe. |
-action_result.data.\*.value.threat-actor | string | `fp attribute value` | 104.235.89.6 |
-action_result.data.\*.value.twitter-id | string | `fp attribute value` | @BlackR0uter |
-action_result.data.\*.value.uri | string | `fp attribute value` | https://testdomainlink.com/test |
-action_result.data.\*.value.url | string | `fp attribute value` `url` | http://ww1.testdomainlink.com/?subid1=1234 |
-action_result.data.\*.value.user-agent | string | `fp attribute value` | Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; WOW64; Trident/5.0; NP02) |
-action_result.data.\*.value.whois-creation-date | string | `fp attribute value` | 2019-01-09 |
-action_result.data.\*.value.whois-registrant-email | string | `fp attribute value` `email` | 253125567@qq.com |
-action_result.data.\*.value.whois-registrant-name | string | `fp attribute value` | User Name |
-action_result.data.\*.value.whois-registrant-phone | string | `fp attribute value` | 9688007762430 |
-action_result.data.\*.value.whois-registrar | string | `fp attribute value` | user.name@mail.com |
-action_result.data.\*.value.x509-fingerprint-md5 | string | `fp attribute value` `md5` | 378d5543048e583a06a0819f25bd9e85 |
-action_result.data.\*.value.x509-fingerprint-sha1 | string | `fp attribute value` `sha1` | 6565a33dd73b11a30a072537c9424a5b767750e1 |
-action_result.data.\*.value.x509-fingerprint-sha256 | string | `fp attribute value` `sha256` | 27af4b890db1a611d0054d5d4a7d9a36c9f52dffeb67a053be9ea03a495a9302 |
-action_result.data.\*.value.yara | string | `fp attribute value` | rule APT15_MirageFox
-{
-meta:
-author = "Flashpoint"
-analyst = "c.testn"
-fp_report = "APT15_MirageFox"
-source = "hxxps://www[.]intezer[.]com/miragefox-apt15-resurfaces-with-new-tools-based-on-old-ones/"
-md5 = "afe24283fd933bac9d0c933e0c08ba02"
-sha256 = "28d6a9a709b9ead84aece250889a1687c07e19f6993325ba5295410a478da30a"
-
-```
-strings:
-	$MirageFox = { 4D 69 72 61 67 65 46 6F 78 5F 53 65 72 76 65 72 2E 64 61 74 00 64 6C 6C 5F 77 57 69 6E 4D 61 69 }
-		/\*
-		.rdata:100129B0 word_100129B0   dw 0                    ; DATA XREF: .rdata:100129A4o
-		.rdata:100129B2 aMiragefoxServe db 'MirageFox_Server.dat',0
-		.rdata:100129B2                                         ; DATA XREF: .rdata:1001298Co
-		.rdata:100129C7 aDllWwinmain    db 'dll_wWinMain',0     ; DATA XREF: .rdata:off_100129ACo
-		.rdata:100129D4                 align 800h
-		.rdata:100129D4 _rdata          ends
-		\*/
-
-	$SvcSend = { 5C 63 6D 64 2E 65 78 65 00 00 00 00 57 69 6E 53 74 61 30 5C 44 65 66 61 75 6C 74 00 25 73 6F 73 33 32 5F 5F 25 64 2E 69 6E 69 00 00 25 73 75 73 72 33 32 5F 5F 25 64 2E 69 6E 69 00 25 73 75 73 72 65 72 5F 5F 25 64 2E 69 6E 69 00 25 73 20 25 73 20 2D 20 25 73 0A 00 44 3A 5C 53 76 63 53 65 6E 64 2E 6C 6F 67 }
-		/\*
-		.data:100134CC ; CHAR aCmdExe[]
-		.data:100134CC aCmdExe         db '\\cmd.exe',0         ; DATA XREF: sub_100041A2+1B8o
-		.data:100134D5                 align 4
-		.data:100134D8 aWinsta0Default db 'WinSta0\\Default',0  ; DATA XREF: sub_100041A2+188o
-		.data:100134E8 aSos32DIni      db '%sos32__%d.ini',0   ; DATA XREF: sub_100041A2+5Ao
-		.data:100134F7                 align 4
-		.data:100134F8 aSusr32DIni     db '%susr32__%d.ini',0  ; DATA XREF: sub_100041A2+3Fo
-		.data:100134F8                                         ; sub_100045D3+24o
-		.data:10013508 aSusrerDIni     db '%susrer__%d.ini',0  ; DATA XREF: sub_100041A2+21o
-		.data:10013518 aSSS            db '%s %s - %s',0Ah,0   ; DATA XREF: sub_10004766+57o
-		.data:10013524 aDSvcsendLog    db 'D:\\SvcSend.log',0   ; DATA XREF: sub_10004766+27o
-		.data:10013533                 align 4
-		.data:10013534 aA              db 'a+',0               ; DATA XREF: sub_10004766+22o
-		.data:10013537                 align 4
-		.data:10013538 unk_10013538    db  20h                 ; DATA XREF: sub_10004B19+2o
-		\*/
-
-condition:
-	(uint16(0) == 0x5A4D and uint8(uint32(0x3c)+23) == 0x21 and $MirageFox and $SvcSend) or
-	(uint16(0) == 0x5A4D and uint8(uint32(0x3c)+23) == 0x21 and $MirageFox) // Some variants do not drop SvcSend.log. Comment out this last condition to detect only variants that drop SvcSend.log
-```
-
-} |
+action_result.parameter.from | numeric | | 0 500 |
+action_result.parameter.ioc_types | string | `fp attribute type` | ipv4 domain,url |
+action_result.parameter.last_seen_after | string | | -30d 2024-02-09T02:01:02Z |
+action_result.parameter.size | numeric | | 10 1000 |
+action_result.parameter.sort | string | | last_seen_at:desc |
+action_result.data.\*.created_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.entity_type | string | | indicator |
+action_result.data.\*.hashes.md5 | string | `md5` | 16139ce9025274a388a4281fef65049e |
+action_result.data.\*.hashes.sha1 | string | `sha1` | da39a3ee5e6b4b0d3255bfef95601890afd80709 |
+action_result.data.\*.hashes.sha256 | string | `sha256` | aedf215a803599bb3858947f23aaa6cf5b01a4d6cf2d16704a6ff0ff1a9611ad |
+action_result.data.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.id | string | `flashpoint indicator id` | AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.last_seen_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.latest_sighting.description | string | | Observation: vidar "b94b6f6f588b8d04747f3e0e0598e88ba95d080f7786aa50b864007b65da76a0" [2026-09-09T11:10:20.637Z] |
+action_result.data.\*.latest_sighting.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/sightings/68U2DrpnUBigRcO8iAi_hQ |
+action_result.data.\*.latest_sighting.id | string | | 68U2DrpnUBigRcO8iAi_hQ |
+action_result.data.\*.latest_sighting.sighted_at | string | | 2026-09-09T11:10:20.637000Z |
+action_result.data.\*.latest_sighting.source | string | | external_intelligence |
+action_result.data.\*.latest_sighting.tags.\* | string | | file_type:exe |
+action_result.data.\*.modified_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.platform_urls.ignite | string | `url` | https://app.flashpoint.io/technical-intelligence/indicators/AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.score.last_scored_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.score.raw_score | numeric | | 0 |
+action_result.data.\*.score.value | string | | informational suspicious malicious |
+action_result.data.\*.sightings.\*.description | string | | Extracted configuration observed by Flashpoint |
+action_result.data.\*.sightings.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/sightings/qOpTj49MUeCXD5VXxKaJZA |
+action_result.data.\*.sightings.\*.id | string | `flashpoint sighting id` | qOpTj49MUeCXD5VXxKaJZA |
+action_result.data.\*.sightings.\*.sighted_at | string | | 2025-07-20T11:02:13Z |
+action_result.data.\*.sightings.\*.source | string | | flashpoint_extraction external_osint |
+action_result.data.\*.sightings.\*.tags.\* | string | | malware:metastealer source:flashpoint_extraction |
+action_result.data.\*.sort_date | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.total_sightings | numeric | | 1 |
+action_result.data.\*.type | string | `fp attribute type` | ipv4 file domain url |
+action_result.data.\*.value | string | `flashpoint ioc value` | 198.51.100.24 |
 action_result.status | string | | success failed |
-action_result.message | string | | Total iocs: 1000 |
-action_result.summary.total_iocs | numeric | | 1000 |
+action_result.message | string | | Total iocs: 10 The 'size' parameter was reduced to 500 because the API returns at most 500 records when the 'embed' parameter is provided |
+action_result.summary.total_iocs | numeric | | 10 |
 summary.total_objects | numeric | | 1 |
 summary.total_objects_successful | numeric | | 1 |
 
 ## action: 'search indicators'
 
-Fetch an IoC value of a specific attribute type from the list of available IoCs on the Flashpoint Platform
+Fetch the IoCs matching the provided IoC value from the Flashpoint Technical Intelligence v2 API, narrowed by the available filters
 
 Type: **investigate** <br>
 Read only: **True**
@@ -1689,151 +1111,565 @@ Read only: **True**
 
 PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
 --------- | -------- | ----------- | ---- | --------
-**attribute_type** | required | Retrieve specific indicator's attribute type result | string | `fp attribute type` |
-**attribute_value** | required | Retrieve specific indicator's attribute type result based on the provided value | string | `fp attribute value` |
-**limit** | optional | Maximum number of reports to be fetched (default: 500) | numeric | |
+**ioc_value** | required | Plain-text value to match against the IoC values. A value wrapped in double quotes is matched exactly, an unquoted value is matched partially | string | `flashpoint ioc value` |
+**ioc_types** | optional | Comma-separated list of IoC types to match (allowed values: domain, extracted_config, file, ipv4, ipv6, url) | string | `fp attribute type` |
+**size** | optional | Maximum number of IoCs to be fetched in one request (default: 10, maximum: 1000, maximum: 500 when 'embed' is provided) | numeric | |
+**from** | optional | Zero-based index of the first IoC to be fetched (default: 0) | numeric | |
+**cidr_range** | optional | CIDR range to match against the ipv4 or ipv6 IoC values | string | |
+**tags** | optional | Comma-separated list of exact IoC tags to match, for example malware:asprox, actor:ta505, os:windows or report:004W2YABmBdJgq5I9VMh | string | |
+**sources** | optional | Comma-separated list of exact source tags to match, for example flashpoint_extraction, flashpoint_apt or external_intelligence (the 'source:' prefix is optional) | string | |
+**actors** | optional | Comma-separated list of exact actor tags to match (the actor tag prefix is optional) | string | |
+**malware** | optional | Comma-separated list of exact malware tags to match (the 'malware:' prefix is optional) | string | |
+**mitre_attack_ids** | optional | Comma-separated list of MITRE ATT&CK technique IDs to match, for example T1041 | string | |
+**min_score** | optional | Minimum score tier of the IoCs to be fetched | string | |
+**max_score** | optional | Maximum score tier of the IoCs to be fetched | string | |
+**has_intel_report** | optional | Fetch only the IoCs that have an associated intelligence report | boolean | |
+**has_extracted_config** | optional | Fetch only the IoCs that have an associated extracted configuration | boolean | |
+**embed** | optional | Comma-separated list of additional fields to embed in the response (allowed values: all, apt_description, external_references, malware_description, mitre_attack_ids, related_iocs). Providing this parameter caps the response at 500 IoCs | string | |
+**last_seen_after** | optional | Include IoCs last seen on or after this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d, -8h, +1w) | string | |
+**last_seen_before** | optional | Include IoCs last seen before this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d, -8h, +1w) | string | |
+**created_after** | optional | Include IoCs created on or after this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d, -8h, +1w) | string | |
+**created_before** | optional | Include IoCs created before this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d, -8h, +1w) | string | |
+**modified_after** | optional | Include IoCs modified on or after this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d, -8h, +1w) | string | |
+**modified_before** | optional | Include IoCs modified before this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d, -8h, +1w) | string | |
+**sort** | optional | Date field and direction used to sort the fetched IoCs (default: last_seen_at:desc) | string | |
+**include_total_count** | optional | Fetch the exact count of the matching IoCs into the action summary. This increases the response time on large result sets | boolean | |
 
 #### Action Output
 
 DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
 --------- | ---- | -------- | --------------
-action_result.parameter.attribute_type | string | `fp attribute type` | url domain ip-src ip-dst md5 sha1 sha256 sha512 |
-action_result.parameter.attribute_value | string | `fp attribute value` | 73d125f84503bd87f8142cf2ba8ab05e http://ww1.testdomainlink.com/?subid1=1234 |
-action_result.parameter.limit | numeric | | 500 |
-action_result.data.\*.Attribute.Event.RelatedEvent.\*.Event.fpid | string | | g8L1tzecUgOS6FWvBJrCxA |
-action_result.data.\*.Attribute.Event.RelatedEvent.\*.Event.info | string | | DarkHotel |
-action_result.data.\*.Attribute.Event.fpid | string | | zP1UL5zqWf6PxQv8f5OkdA |
-action_result.data.\*.Attribute.Event.href | string | | https://api.flashpoint.io/technical-intelligence/v1/event/zP1UL5zqWf6PxQv8f5OkdA |
-action_result.data.\*.Attribute.Event.info | string | | CryptingService_f59e91ef018b716d525bf7bcf50edbc040321748_2019-06-17T04:01:01.000Z |
-action_result.data.\*.Attribute.Event.timestamp | string | | 1560895664 |
-action_result.data.\*.Attribute.category | string | | Payload delivery |
-action_result.data.\*.Attribute.fpid | string | | tQ3UYKNAUV-iSWQp7s3ppg |
-action_result.data.\*.Attribute.href | string | | https://api.flashpoint.io/technical-intelligence/v1/attribute/tQ3UYKNAUV-iSWQp7s3ppg |
-action_result.data.\*.Attribute.timestamp | string | | 1560895664 |
-action_result.data.\*.Attribute.type | string | `fp attribute type` | md5 |
-action_result.data.\*.Attribute.uuid | string | | c0e430ce-c96a-47ac-aa7d-d90b83bd4fe5 |
-action_result.data.\*.Attribute.value.comment | string | | |
-action_result.data.\*.Attribute.value.md5 | string | `fp attribute value` `md5` | 7444589a147dc4e5b351cc20eadedc22 |
-action_result.data.\*.Event.RelatedEvent.\*.Event.fpid | string | | Z0x7QOWoX0yJ4iYuK2ZYLA |
-action_result.data.\*.Event.RelatedEvent.\*.Event.info | string | | VBCrypter pivot on Wipro data |
-action_result.data.\*.Event.Tags | string | | region:China |
-action_result.data.\*.Event.fpid | string | | h-Uvmip4VPSshdEj7PgmcQ |
-action_result.data.\*.Event.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v1/event/A-1RokO9Wqq11S78N2TojA |
-action_result.data.\*.Event.info | string | | APT 1 Historic Indicators |
-action_result.data.\*.Event.timestamp | string | | 1539871610 |
-action_result.data.\*.category | string | | Payload delivery |
-action_result.data.\*.fpid | string | | -2kF-m_qWw6mpDcF4MuITg |
-action_result.data.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v1/attribute/caG9zjTIW8u_md8rfGWDjg |
-action_result.data.\*.timestamp | string | | 1539871466 |
-action_result.data.\*.type | string | `fp attribute type` | md5 |
-action_result.data.\*.uuid | string | | 5bc892ea-ed70-45e4-8edb-5b560a640c05 |
-action_result.data.\*.value.AS | string | `fp attribute value` | AS16276 |
-action_result.data.\*.value.attachment | string | `fp attribute value` | 72832db9b951663b8f322778440b8720ea95cde0349a1d26477edd95b3915479 |
-action_result.data.\*.value.authentihash | string | `fp attribute value` | c50d6e2cf0e6018b5ed8fc3ffea51e0aa5d4bb4e1c027b65ed9a5fff84db9765 |
-action_result.data.\*.value.btc | string | `fp attribute value` | 15HUUDBjLD34XfCu6YtafT7ARSt2TBrLBe |
-action_result.data.\*.value.campaign-name | string | `fp attribute value` | WizardOpium |
-action_result.data.\*.value.comment | string | | |
-action_result.data.\*.value.cookie | string | `fp attribute value` | adwords_02 |
-action_result.data.\*.value.domain | string | `fp attribute value` `domain` | adsfinder.xyz |
-action_result.data.\*.value.email-dst | string | `fp attribute value` `email` | trash023@ambcomission.com |
-action_result.data.\*.value.email-src | string | `fp attribute value` `email` | email@testdomainlink.com |
-action_result.data.\*.value.email-src-display-name | string | `fp attribute value` | Telstra |
-action_result.data.\*.value.email-subject | string | `fp attribute value` | Your Telstra Business Email Bill |
-action_result.data.\*.value.filename | string | `fp attribute value` | secure-ingdirect.top |
-action_result.data.\*.value.first-name | string | `fp attribute value` | Javad |
-action_result.data.\*.value.float | string | `fp attribute value` | 6.1704414228235 |
-action_result.data.\*.value.github-username | string | `fp attribute value` | BlackRouter |
-action_result.data.\*.value.hostname | string | `fp attribute value` | testdomainlink.com |
-action_result.data.\*.value.imphash | string | `fp attribute value` | a872d0dcbb4472f66f79cb57e73e177d |
-action_result.data.\*.value.ip-dst | string | `fp attribute value` `ip` | 210.122.7.129 |
-action_result.data.\*.value.ip-dst|port | string | `fp attribute value` | 5.79.68.110|80 |
-action_result.data.\*.value.ip-src | string | `fp attribute value` `ip` | 101.55.64.246 |
-action_result.data.\*.value.link | string | `fp attribute value` | https://www.testdomainlink.com/test.html |
-action_result.data.\*.value.malware-sample | string | `fp attribute value` | sample.exe|2f17c915610bxxxb59c01981ed2594c5 |
-action_result.data.\*.value.md5 | string | `fp attribute value` `md5` | 73d125f84503bd87f8142cf2ba8ab05e |
-action_result.data.\*.value.mutex | string | `fp attribute value` | c2hpdHmjcmF6eUBleHBsb2l0Lmlt_NONE_DL |
-action_result.data.\*.value.other | string | `fp attribute value` | id:wc4XnQq4X-GrNjTP9gFh4g |
-action_result.data.\*.value.pattern-in-file | string | `fp attribute value` | D:\\PATH.ext |
-action_result.data.\*.value.pattern-in-memory | string | `fp attribute value` | %PUBLIC%\\Public\\hUpdated.ps1 |
-action_result.data.\*.value.pdb | string | `fp attribute value` | u:\\SAM\\Servers\\Sam-onion-no-check-lock-file-enc-all-ext\\SAM\\obj\\Release\\MIKOPONI.pdb |
-action_result.data.\*.value.port | string | `fp attribute value` | 443 |
-action_result.data.\*.value.regkey | string | `fp attribute value` | HKEY_CURRENT_USER\\SOFTWARE\\FakeMessage\\FakeMessage |
-action_result.data.\*.value.regkey|value | string | `fp attribute value` | HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run|%APPDATA%\\9bc79ecb-e94e-4db2-bd38-4950445a4f10\\dsl host\\dslhost.exe |
-action_result.data.\*.value.sha1 | string | `fp attribute value` `sha1` | ba6045f30a940efdede47b0c6e3a73d3df7e0bfe |
-action_result.data.\*.value.sha256 | string | `fp attribute value` `sha256` | 32acb0ab5c16e624764f282f84f160984d436c777ad1a41ee8080b50db98e199 |
-action_result.data.\*.value.sha512 | string | `fp attribute value` | ad2f7c7470a9a48faa311d9eb85b1e30686bd553915434eed77e8103986401899a789702ae6af63e00c14195f4c2eb1c4c03c2f92c26bf90ddc293e76dfbee08 |
-action_result.data.\*.value.size-in-bytes | string | `fp attribute value` | Enriched via the stiximport module |
-action_result.data.\*.value.snort | string | `fp attribute value` | alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"FlashPoint DMSniff UserAgent"; flow:established,to_server; content:"DSNF\_"; http_user_agent; classtype:trojan-activity; sid:9000030; rev:1; metadata:author Jason Reaves;) |
-action_result.data.\*.value.ssdeep | string | `fp attribute value` | 3072:pNwZ4j/a2NlHbAoTL4592kHhEBZTWTBfg09ruXlN:pNwZ4zaibAoTL45oMEPWTBp9ruXl |
-action_result.data.\*.value.target-external | string | `fp attribute value` | www.testdomainlink.com |
-action_result.data.\*.value.target-machine | string | `fp attribute value` | 103.205.134.74 |
-action_result.data.\*.value.target-org | string | `fp attribute value` | Org Value |
-action_result.data.\*.value.text | string | `fp attribute value` | %TEMP%\\8112.tmp reads from %WINDIR%\\system32\\lsass.exe. |
-action_result.data.\*.value.threat-actor | string | `fp attribute value` | 104.235.89.6 |
-action_result.data.\*.value.twitter-id | string | `fp attribute value` | @Gdbncdsxx |
-action_result.data.\*.value.uri | string | `fp attribute value` | https://testdomainlink.com/test |
-action_result.data.\*.value.url | string | `fp attribute value` `url` | http://ww1.testdomainlink.com/?subid1=1234 |
-action_result.data.\*.value.user-agent | string | `fp attribute value` | User Agent |
-action_result.data.\*.value.whois-creation-date | string | `fp attribute value` | 2019-01-09 |
-action_result.data.\*.value.whois-registrant-email | string | `fp attribute value` `email` | 2531sdbaejrw7@qq.com |
-action_result.data.\*.value.whois-registrant-name | string | `fp attribute value` | User Name |
-action_result.data.\*.value.whois-registrant-phone | string | `fp attribute value` | 9688007762430 |
-action_result.data.\*.value.whois-registrar | string | `fp attribute value` | user.name@mail.com |
-action_result.data.\*.value.x509-fingerprint-md5 | string | `fp attribute value` `md5` | 378d5543048e583a06a0819f25bd9e85 |
-action_result.data.\*.value.x509-fingerprint-sha1 | string | `fp attribute value` `sha1` | 6565a33dd73b11a30a072537c9424a5b767750e1 |
-action_result.data.\*.value.x509-fingerprint-sha256 | string | `fp attribute value` `sha256` | 27af4b890db1a611d0054d5d4a7d9a36c9f52dffeb67a053be9ea03a495a9302 |
-action_result.data.\*.value.yara | string | `fp attribute value` | rule APT15_MirageFox
-{
-meta:
-author = "Flashpoint"
-analyst = "c.testn"
-fp_report = "APT15_MirageFox"
-source = "hxxps://www[.]intezer[.]com/miragefox-apt15-resurfaces-with-new-tools-based-on-old-ones/"
-md5 = "afe24283fd933bac9d0c933e0c08ba02"
-sha256 = "28d6a9a709b9ead84aece250889a1687c07e19f6993325ba5295410a478da30a"
-
-```
-strings:
-	$MirageFox = { 4D 69 72 61 67 65 46 6F 78 5F 53 65 72 76 65 72 2E 64 61 74 00 64 6C 6C 5F 77 57 69 6E 4D 61 69 }
-		/\*
-		.rdata:100129B0 word_100129B0   dw 0                    ; DATA XREF: .rdata:100129A4o
-		.rdata:100129B2 aMiragefoxServe db 'MirageFox_Server.dat',0
-		.rdata:100129B2                                         ; DATA XREF: .rdata:1001298Co
-		.rdata:100129C7 aDllWwinmain    db 'dll_wWinMain',0     ; DATA XREF: .rdata:off_100129ACo
-		.rdata:100129D4                 align 800h
-		.rdata:100129D4 _rdata          ends
-		\*/
-
-	$SvcSend = { 5C 63 6D 64 2E 65 78 65 00 00 00 00 57 69 6E 53 74 61 30 5C 44 65 66 61 75 6C 74 00 25 73 6F 73 33 32 5F 5F 25 64 2E 69 6E 69 00 00 25 73 75 73 72 33 32 5F 5F 25 64 2E 69 6E 69 00 25 73 75 73 72 65 72 5F 5F 25 64 2E 69 6E 69 00 25 73 20 25 73 20 2D 20 25 73 0A 00 44 3A 5C 53 76 63 53 65 6E 64 2E 6C 6F 67 }
-		/\*
-		.data:100134CC ; CHAR aCmdExe[]
-		.data:100134CC aCmdExe         db '\\cmd.exe',0         ; DATA XREF: sub_100041A2+1B8o
-		.data:100134D5                 align 4
-		.data:100134D8 aWinsta0Default db 'WinSta0\\Default',0  ; DATA XREF: sub_100041A2+188o
-		.data:100134E8 aSos32DIni      db '%sos32__%d.ini',0   ; DATA XREF: sub_100041A2+5Ao
-		.data:100134F7                 align 4
-		.data:100134F8 aSusr32DIni     db '%susr32__%d.ini',0  ; DATA XREF: sub_100041A2+3Fo
-		.data:100134F8                                         ; sub_100045D3+24o
-		.data:10013508 aSusrerDIni     db '%susrer__%d.ini',0  ; DATA XREF: sub_100041A2+21o
-		.data:10013518 aSSS            db '%s %s - %s',0Ah,0   ; DATA XREF: sub_10004766+57o
-		.data:10013524 aDSvcsendLog    db 'D:\\SvcSend.log',0   ; DATA XREF: sub_10004766+27o
-		.data:10013533                 align 4
-		.data:10013534 aA              db 'a+',0               ; DATA XREF: sub_10004766+22o
-		.data:10013537                 align 4
-		.data:10013538 unk_10013538    db  20h                 ; DATA XREF: sub_10004B19+2o
-		\*/
-
-condition:
-	(uint16(0) == 0x5A4D and uint8(uint32(0x3c)+23) == 0x21 and $MirageFox and $SvcSend) or
-	(uint16(0) == 0x5A4D and uint8(uint32(0x3c)+23) == 0x21 and $MirageFox) // Some variants do not drop SvcSend.log. Comment out this last condition to detect only variants that drop SvcSend.log
-```
-
-} |
+action_result.parameter.actors | string | | ta505 |
+action_result.parameter.cidr_range | string | | 198.51.100.0/24 |
+action_result.parameter.created_after | string | | -7d |
+action_result.parameter.created_before | string | | 2024-02-11 |
+action_result.parameter.embed | string | | all mitre_attack_ids,external_references |
+action_result.parameter.from | numeric | | 0 500 |
+action_result.parameter.has_extracted_config | boolean | | True False |
+action_result.parameter.has_intel_report | boolean | | True False |
+action_result.parameter.include_total_count | boolean | | True False |
+action_result.parameter.ioc_types | string | `fp attribute type` | ipv4 domain,url |
+action_result.parameter.ioc_value | string | `flashpoint ioc value` | example.com "198.51.100.24" |
+action_result.parameter.last_seen_after | string | | -30d 2024-02-09T02:01:02Z |
+action_result.parameter.last_seen_before | string | | 2024-02-11T02:01:02Z |
+action_result.parameter.malware | string | | metastealer |
+action_result.parameter.max_score | string | | malicious |
+action_result.parameter.min_score | string | | suspicious |
+action_result.parameter.mitre_attack_ids | string | | T1041 |
+action_result.parameter.modified_after | string | | -1w |
+action_result.parameter.modified_before | string | | 2024-02-11 |
+action_result.parameter.size | numeric | | 10 1000 |
+action_result.parameter.sort | string | | last_seen_at:desc |
+action_result.parameter.sources | string | | source:flashpoint_extraction flashpoint_apt,external_intelligence |
+action_result.parameter.tags | string | | malware:asprox report:004W2YABmBdJgq5I9VMh |
+action_result.data.\*.apt_description | string | | A financially motivated threat actor tracked by Flashpoint since 2019. |
+action_result.data.\*.created_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.entity_type | string | | indicator |
+action_result.data.\*.external_references.\*.source_name | string | | ThreatExample Blog |
+action_result.data.\*.external_references.\*.url | string | `url` | https://threatexample.com |
+action_result.data.\*.hashes.md5 | string | `md5` | 16139ce9025274a388a4281fef65049e |
+action_result.data.\*.hashes.sha1 | string | `sha1` | da39a3ee5e6b4b0d3255bfef95601890afd80709 |
+action_result.data.\*.hashes.sha256 | string | `sha256` | aedf215a803599bb3858947f23aaa6cf5b01a4d6cf2d16704a6ff0ff1a9611ad |
+action_result.data.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.id | string | `flashpoint indicator id` | AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.last_seen_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.latest_sighting.apt_description | string | | N/A |
+action_result.data.\*.latest_sighting.created_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.description | string | | Observation: vidar "b94b6f6f588b8d04747f3e0e0598e88ba95d080f7786aa50b864007b65da76a0" [2026-09-09T11:10:20.637Z] |
+action_result.data.\*.latest_sighting.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/sightings/68U2DrpnUBigRcO8iAi_hQ |
+action_result.data.\*.latest_sighting.id | string | | 68U2DrpnUBigRcO8iAi_hQ |
+action_result.data.\*.latest_sighting.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.latest_sighting.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.latest_sighting.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.latest_sighting.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.latest_sighting.modified_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.related_iocs.\* | string | | |
+action_result.data.\*.latest_sighting.related_iocs.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/agRd2c-VX8iLTZekIARl_w |
+action_result.data.\*.latest_sighting.related_iocs.\*.id | string | | agRd2c-VX8iLTZekIARl_w |
+action_result.data.\*.latest_sighting.related_iocs.\*.type | string | | file |
+action_result.data.\*.latest_sighting.related_iocs.\*.value | string | | b94b6f6f588b8d04747f3e0e0598e88ba95d080f7786aa50b864007b65da76a0 |
+action_result.data.\*.latest_sighting.sighted_at | string | | 2026-09-09T11:10:20.637000Z |
+action_result.data.\*.latest_sighting.source | string | | external_intelligence |
+action_result.data.\*.latest_sighting.tags.\* | string | | file_type:exe |
+action_result.data.\*.malware_description | string | | An information stealer sold as malware-as-a-service. |
+action_result.data.\*.mitre_attack_ids.\*.id | string | | T1041 |
+action_result.data.\*.mitre_attack_ids.\*.name | string | | Exfiltration Over C2 Channel |
+action_result.data.\*.mitre_attack_ids.\*.tactics.\* | string | | Exfiltration |
+action_result.data.\*.modified_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.platform_urls.ignite | string | `url` | https://app.flashpoint.io/technical-intelligence/indicators/AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.score.last_scored_at | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.score.raw_score | numeric | | 0 |
+action_result.data.\*.score.value | string | | informational suspicious malicious |
+action_result.data.\*.sightings.\*.apt_description | string | | N/A |
+action_result.data.\*.sightings.\*.created_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.description | string | | Extracted configuration observed by Flashpoint |
+action_result.data.\*.sightings.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/sightings/qOpTj49MUeCXD5VXxKaJZA |
+action_result.data.\*.sightings.\*.id | string | `flashpoint sighting id` | qOpTj49MUeCXD5VXxKaJZA |
+action_result.data.\*.sightings.\*.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.sightings.\*.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.sightings.\*.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.sightings.\*.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.sightings.\*.modified_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.related_iocs.\* | string | | |
+action_result.data.\*.sightings.\*.related_iocs.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.sightings.\*.related_iocs.\*.id | string | `flashpoint indicator id` | AvnahLkdXU6p-ahsDMr_JQ |
+action_result.data.\*.sightings.\*.related_iocs.\*.type | string | `fp attribute type` | domain |
+action_result.data.\*.sightings.\*.related_iocs.\*.value | string | `flashpoint ioc value` | example.com |
+action_result.data.\*.sightings.\*.sighted_at | string | | 2025-07-20T11:02:13Z |
+action_result.data.\*.sightings.\*.source | string | | flashpoint_extraction external_osint |
+action_result.data.\*.sightings.\*.tags.\* | string | | malware:metastealer source:flashpoint_extraction |
+action_result.data.\*.sort_date | string | | 2025-07-21T15:30:00Z |
+action_result.data.\*.total_sightings | numeric | | 1 |
+action_result.data.\*.type | string | `fp attribute type` | ipv4 file domain url |
+action_result.data.\*.value | string | `flashpoint ioc value` | 198.51.100.24 |
 action_result.status | string | | success failed |
-action_result.message | string | | Total iocs: 1 |
-action_result.summary.total_iocs | numeric | | 1 |
+action_result.message | string | | Total iocs: 10 The 'size' parameter was reduced to 500 because the API returns at most 500 records when the 'embed' parameter is provided |
+action_result.summary.total_count | numeric | | 4211 |
+action_result.summary.total_iocs | numeric | | 10 |
 summary.total_objects | numeric | | 1 |
 summary.total_objects_successful | numeric | | 1 |
+
+## action: 'get indicator'
+
+Fetch the full detail of a single IoC from the Flashpoint Technical Intelligence v2 API
+
+Type: **investigate** <br>
+Read only: **True**
+
+#### Action Parameters
+
+PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
+--------- | -------- | ----------- | ---- | --------
+**indicator_id** | required | ID of the IoC to fetch | string | `flashpoint indicator id` |
+**sighting_count** | optional | Maximum number of most recent sightings to return with the IoC (default: 100, minimum: 1, maximum: 1000) | numeric | |
+
+#### Action Output
+
+DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
+--------- | ---- | -------- | --------------
+action_result.parameter.indicator_id | string | `flashpoint indicator id` | jMXpz9FQXMyPM420kglTAg |
+action_result.parameter.sighting_count | numeric | | 100 |
+action_result.data.\*.apt_description | string | | N/A |
+action_result.data.\*.created_at | string | | 2020-10-27T13:22:05Z |
+action_result.data.\*.entity_type | string | | indicator |
+action_result.data.\*.external_references.\*.source_name | string | | Flashpoint |
+action_result.data.\*.external_references.\*.url | string | | https://api.flashpoint.io/finished-intelligence/v1/reports/P_ZCCrviScaNDXu-P0ns4w |
+action_result.data.\*.hashes.md5 | string | `md5` | 16139ce9025274a388a4281fef65049e |
+action_result.data.\*.hashes.sha1 | string | `sha1` | da39a3ee5e6b4b0d3255bfef95601890afd80709 |
+action_result.data.\*.hashes.sha256 | string | `sha256` | a885b1f5a26e1a4bd1a24c1c0b0b4a5c9e2f3d4b5a6978695a4b3c2d1e0f4683 |
+action_result.data.\*.historical_tags.\* | string | | file_type:exe |
+action_result.data.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/jMXpz9FQXMyPM420kglTAg |
+action_result.data.\*.id | string | `flashpoint indicator id` | jMXpz9FQXMyPM420kglTAg |
+action_result.data.\*.last_seen_at | string | | 2025-05-08T16:47:25Z |
+action_result.data.\*.latest_sighting.apt_description | string | | N/A |
+action_result.data.\*.latest_sighting.created_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.description | string | | Observation: mirai "011eb609b33a0cd3971ee0b7e8effee3960913c0688dcf78734a00b151b10529" [2026-09-15T07:00:46.319Z] |
+action_result.data.\*.latest_sighting.href | string | | https://api.flashpoint.io/technical-intelligence/v2/sightings/NlBPeIaKUMqX70CFOhDBZg |
+action_result.data.\*.latest_sighting.id | string | | NlBPeIaKUMqX70CFOhDBZg |
+action_result.data.\*.latest_sighting.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.latest_sighting.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.latest_sighting.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.latest_sighting.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.latest_sighting.modified_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.related_iocs.\*.apt_description | string | | N/A |
+action_result.data.\*.latest_sighting.related_iocs.\*.created_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.related_iocs.\*.entity_type | string | | indicator |
+action_result.data.\*.latest_sighting.related_iocs.\*.external_references.\*.source_name | string | | Flashpoint |
+action_result.data.\*.latest_sighting.related_iocs.\*.external_references.\*.url | string | | https://api.flashpoint.io/finished-intelligence/v1/reports/P_ZCCrviScaNDXu-P0ns4w |
+action_result.data.\*.latest_sighting.related_iocs.\*.hashes.md5 | string | | |
+action_result.data.\*.latest_sighting.related_iocs.\*.hashes.sha1 | string | | 1d6cae992e93aa936cf1d5ba31e8a8842b66b636 |
+action_result.data.\*.latest_sighting.related_iocs.\*.hashes.sha256 | string | | 011eb609b33a0cd3971ee0b7e8effee3960913c0688dcf78734a00b151b10529 |
+action_result.data.\*.latest_sighting.related_iocs.\*.href | string | | https://api.flashpoint.io/technical-intelligence/v2/indicators/OxBHNY9fWYeiK3zjxx9o_w |
+action_result.data.\*.latest_sighting.related_iocs.\*.id | string | | OxBHNY9fWYeiK3zjxx9o_w |
+action_result.data.\*.latest_sighting.related_iocs.\*.last_seen_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.related_iocs.\*.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.latest_sighting.related_iocs.\*.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.latest_sighting.related_iocs.\*.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.latest_sighting.related_iocs.\*.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.latest_sighting.related_iocs.\*.modified_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.related_iocs.\*.platform_urls.ignite | string | | https://app.flashpoint.io/cti/malware/iocs/OxBHNY9fWYeiK3zjxx9o_w |
+action_result.data.\*.latest_sighting.related_iocs.\*.score.last_scored_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.related_iocs.\*.score.raw_score | numeric | | 0 |
+action_result.data.\*.latest_sighting.related_iocs.\*.score.value | string | | malicious |
+action_result.data.\*.latest_sighting.related_iocs.\*.sightings.\* | string | | |
+action_result.data.\*.latest_sighting.related_iocs.\*.sort_date | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.latest_sighting.related_iocs.\*.total_sightings | numeric | | 0 |
+action_result.data.\*.latest_sighting.related_iocs.\*.type | string | | file |
+action_result.data.\*.latest_sighting.related_iocs.\*.value | string | | 011eb609b33a0cd3971ee0b7e8effee3960913c0688dcf78734a00b151b10529 |
+action_result.data.\*.latest_sighting.sighted_at | string | | 2026-09-15T07:00:46.319000Z |
+action_result.data.\*.latest_sighting.source | string | | flashpoint_extraction |
+action_result.data.\*.latest_sighting.tags.\* | string | | extracted_config:true |
+action_result.data.\*.malware_description | string | | Lokibot is a resident information stealer. |
+action_result.data.\*.mitre_attack_ids.\*.id | string | | T1016 |
+action_result.data.\*.mitre_attack_ids.\*.name | string | | System Network Configuration Discovery |
+action_result.data.\*.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.modified_at | string | | 2025-05-08T16:47:25Z |
+action_result.data.\*.platform_urls.ignite | string | `url` | https://app.flashpoint.io/cti/malware/iocs/jMXpz9FQXMyPM420kglTAg |
+action_result.data.\*.reports.\*.html | string | `url` | https://app.flashpoint.io/intelligence/reports/report/KtHHUswTTSG1IjhreK3ipg |
+action_result.data.\*.reports.\*.json | string | `url` | https://api.flashpoint.io/finished-intelligence/v1/reports/KtHHUswTTSG1IjhreK3ipg |
+action_result.data.\*.score.last_scored_at | string | | 2025-05-08T16:47:25Z |
+action_result.data.\*.score.raw_score | numeric | | 0 |
+action_result.data.\*.score.value | string | | malicious |
+action_result.data.\*.sightings.\*.apt_description | string | | N/A |
+action_result.data.\*.sightings.\*.created_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.description | string | | Observation: vidar "b94b6f6f588b8d04747f3e0e0598e88ba95d080f7786aa50b864007b65da76a0" [2026-09-09T11:10:20.637Z] |
+action_result.data.\*.sightings.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/sightings/68U2DrpnUBigRcO8iAi_hQ |
+action_result.data.\*.sightings.\*.id | string | | 68U2DrpnUBigRcO8iAi_hQ |
+action_result.data.\*.sightings.\*.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.sightings.\*.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.sightings.\*.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.sightings.\*.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.sightings.\*.modified_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.related_iocs.\*.apt_description | string | | N/A |
+action_result.data.\*.sightings.\*.related_iocs.\*.created_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.related_iocs.\*.entity_type | string | | indicator |
+action_result.data.\*.sightings.\*.related_iocs.\*.external_references.\*.source_name | string | | Flashpoint |
+action_result.data.\*.sightings.\*.related_iocs.\*.external_references.\*.url | string | | https://api.flashpoint.io/finished-intelligence/v1/reports/P_ZCCrviScaNDXu-P0ns4w |
+action_result.data.\*.sightings.\*.related_iocs.\*.hashes.md5 | string | | |
+action_result.data.\*.sightings.\*.related_iocs.\*.hashes.sha1 | string | | 1d6cae992e93aa936cf1d5ba31e8a8842b66b636 |
+action_result.data.\*.sightings.\*.related_iocs.\*.hashes.sha256 | string | | 011eb609b33a0cd3971ee0b7e8effee3960913c0688dcf78734a00b151b10529 |
+action_result.data.\*.sightings.\*.related_iocs.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/Je_c0xvXX9aBpoYH |
+action_result.data.\*.sightings.\*.related_iocs.\*.id | string | `flashpoint indicator id` | Je_c0xvXX9aBpoYHkQ7VDg |
+action_result.data.\*.sightings.\*.related_iocs.\*.last_seen_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.related_iocs.\*.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.sightings.\*.related_iocs.\*.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.sightings.\*.related_iocs.\*.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.sightings.\*.related_iocs.\*.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.sightings.\*.related_iocs.\*.modified_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.related_iocs.\*.platform_urls.ignite | string | | https://app.flashpoint.io/cti/malware/iocs/OxBHNY9fWYeiK3zjxx9o_w |
+action_result.data.\*.sightings.\*.related_iocs.\*.score.last_scored_at | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.related_iocs.\*.score.raw_score | numeric | | 0 |
+action_result.data.\*.sightings.\*.related_iocs.\*.score.value | string | | malicious |
+action_result.data.\*.sightings.\*.related_iocs.\*.sightings.\* | string | | |
+action_result.data.\*.sightings.\*.related_iocs.\*.sort_date | string | | 2026-09-15T06:36:32.867Z |
+action_result.data.\*.sightings.\*.related_iocs.\*.total_sightings | numeric | | 0 |
+action_result.data.\*.sightings.\*.related_iocs.\*.type | string | | file |
+action_result.data.\*.sightings.\*.related_iocs.\*.value | string | `flashpoint ioc value` | f8d437d2b1f0d4e6a7c8b9a0d1e2f3a4 |
+action_result.data.\*.sightings.\*.sighted_at | string | | 2020-10-27T13:22:05Z |
+action_result.data.\*.sightings.\*.source | string | | flashpoint_extraction |
+action_result.data.\*.sightings.\*.tags.\* | string | | file_type:exe |
+action_result.data.\*.sort_date | string | | 2026-09-09T11:10:20.637000Z |
+action_result.data.\*.total_sightings | numeric | | 1 |
+action_result.data.\*.type | string | | file |
+action_result.data.\*.value | string | `flashpoint ioc value` | a885b1f5a26e1a4bd1a24c1c0b0b4a5c9e2f3d4b5a6978695a4b3c2d1e0f4683 |
+action_result.status | string | | success failed |
+action_result.message | string | | Successfully fetched the indicator |
+action_result.summary.total_sightings | numeric | | 2 |
+summary.total_objects | numeric | | 1 |
+summary.total_objects_successful | numeric | | 1 |
+
+## action: 'list sightings'
+
+Fetch a list of sightings from the Flashpoint Technical Intelligence v2 API, optionally scoped to one IoC
+
+Type: **investigate** <br>
+Read only: **True**
+
+#### Action Parameters
+
+PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
+--------- | -------- | ----------- | ---- | --------
+**size** | optional | Maximum number of sightings to be fetched in one request (default: 10; maximum: 1000, maximum: 500 when 'embed' is provided) | numeric | |
+**from** | optional | Zero-based index of the first sighting to be fetched (default: 0) | numeric | |
+**sort** | optional | Date field and direction used to sort the fetched sightings (default: sighted_at:desc) | string | |
+**tags** | optional | Comma-separated list of exact sighting tags to match, for example malware:asprox | string | |
+**sources** | optional | Comma-separated list of exact sighting sources to match, for example flashpoint_extraction | string | |
+**embed** | optional | Comma-separated list of additional fields to embed in the response (allowed values: all, apt_description, malware_description, mitre_attack_ids). Providing this parameter caps the response at 500 sightings | string | |
+**sighted_after** | optional | Include sightings sighted on or after this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d) | string | |
+**sighted_before** | optional | Include sightings sighted before this date. Supports an absolute datetime (2024-01-01T00:00:00Z), a date (2024-01-01) or a relative value (-30d) | string | |
+**created_after** | optional | Include sightings created on or after this date. Supports an absolute datetime, a date or a relative value | string | |
+**created_before** | optional | Include sightings created before this date. Supports an absolute datetime, a date or a relative value | string | |
+**modified_after** | optional | Include sightings modified on or after this date. Supports an absolute datetime, a date or a relative value | string | |
+**modified_before** | optional | Include sightings modified before this date. Supports an absolute datetime, a date or a relative value | string | |
+**include_total_count** | optional | Fetch the exact count of the matching sightings into the action summary. This increases the response time on large result sets | boolean | |
+
+#### Action Output
+
+DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
+--------- | ---- | -------- | --------------
+action_result.parameter.created_after | string | | -30d |
+action_result.parameter.created_before | string | | 2026-09-08T00:00:00Z |
+action_result.parameter.embed | string | | all |
+action_result.parameter.from | numeric | | 0 |
+action_result.parameter.include_total_count | boolean | | True False |
+action_result.parameter.modified_after | string | | -30d |
+action_result.parameter.modified_before | string | | 2026-09-08T00:00:00Z |
+action_result.parameter.sighted_after | string | | -3d |
+action_result.parameter.sighted_before | string | | now |
+action_result.parameter.size | numeric | | 10 |
+action_result.parameter.sort | string | | sighted_at:desc |
+action_result.parameter.sources | string | | external_intelligence |
+action_result.parameter.tags | string | | malware:tofsee |
+action_result.data.\*.apt_description | string | | N/A |
+action_result.data.\*.created_at | string | | 2026-09-08T09:14:03Z |
+action_result.data.\*.description | string | | Observation: berbew "d70ea318...fc" [2026-09-08] |
+action_result.data.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/sightings/bHVysNDhUua_lrBmW6e_uQ |
+action_result.data.\*.id | string | `flashpoint sighting id` | bHVysNDhUua_lrBmW6e_uQ |
+action_result.data.\*.malware_description | string | | Tofsee is a modular spambot. |
+action_result.data.\*.mitre_attack_ids.\*.id | string | | T1041 |
+action_result.data.\*.mitre_attack_ids.\*.name | string | | Exfiltration Over C2 Channel |
+action_result.data.\*.mitre_attack_ids.\*.tactics.\* | string | | discovery |
+action_result.data.\*.modified_at | string | | 2026-09-08T09:14:03Z |
+action_result.data.\*.related_iocs.\*.apt_description | string | | N/A |
+action_result.data.\*.related_iocs.\*.created_at | string | | 2026-09-09T11:10:20.637000Z |
+action_result.data.\*.related_iocs.\*.entity_type | string | | indicator |
+action_result.data.\*.related_iocs.\*.external_references.\*.source_name | string | | Flashpoint |
+action_result.data.\*.related_iocs.\*.external_references.\*.url | string | | https://api.flashpoint.io/finished-intelligence/v1/reports/P_ZCCrviScaNDXu-P0ns4w |
+action_result.data.\*.related_iocs.\*.hashes.md5 | string | `md5` | |
+action_result.data.\*.related_iocs.\*.hashes.sha1 | string | `sha1` | 8f06edf96f194a0818a2da85e631af2fced7d383 |
+action_result.data.\*.related_iocs.\*.hashes.sha256 | string | `sha256` | d70ea318a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293afc00 |
+action_result.data.\*.related_iocs.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/6w6Dfq3mU6-EEChotntP |
+action_result.data.\*.related_iocs.\*.id | string | `flashpoint indicator id` | 6w6Dfq3mU6-EEChotntPzg |
+action_result.data.\*.related_iocs.\*.last_seen_at | string | | 2026-09-08T09:00:21Z |
+action_result.data.\*.related_iocs.\*.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.related_iocs.\*.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.related_iocs.\*.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.related_iocs.\*.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.related_iocs.\*.modified_at | string | | 2026-09-09T11:18:13.171000Z |
+action_result.data.\*.related_iocs.\*.platform_urls.ignite | string | `url` | https://app.flashpoint.io/cti/malware/iocs/agRd2c-VX8iLTZekIARl_w |
+action_result.data.\*.related_iocs.\*.score.last_scored_at | string | | 2026-09-09T11:18:11.977888Z |
+action_result.data.\*.related_iocs.\*.score.raw_score | numeric | | 0 |
+action_result.data.\*.related_iocs.\*.score.value | string | | suspicious |
+action_result.data.\*.related_iocs.\*.sightings.\* | string | | |
+action_result.data.\*.related_iocs.\*.sort_date | string | | 2026-09-09T11:10:20.637000Z |
+action_result.data.\*.related_iocs.\*.total_sightings | numeric | | 0 |
+action_result.data.\*.related_iocs.\*.type | string | | file |
+action_result.data.\*.related_iocs.\*.value | string | `flashpoint ioc value` | d70ea318a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293afc00 |
+action_result.data.\*.sighted_at | string | | 2026-09-08T09:00:21Z |
+action_result.data.\*.source | string | | external_intelligence |
+action_result.data.\*.tags.\* | string | | file_type:exe |
+action_result.status | string | | success failed |
+action_result.message | string | | Total sightings: 10 |
+action_result.summary.total_count | numeric | | 4211 |
+action_result.summary.total_sightings | numeric | | 10 |
+summary.total_objects | numeric | | 1 |
+summary.total_objects_successful | numeric | | 1 |
+
+## action: 'get sighting'
+
+Fetch the full detail of a single sighting from the Flashpoint Technical Intelligence v2 API
+
+Type: **investigate** <br>
+Read only: **True**
+
+#### Action Parameters
+
+PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
+--------- | -------- | ----------- | ---- | --------
+**sighting_id** | required | ID of the sighting to fetch | string | `flashpoint sighting id` |
+
+#### Action Output
+
+DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
+--------- | ---- | -------- | --------------
+action_result.parameter.sighting_id | string | `flashpoint sighting id` | bHVysNDhUua_lrBmW6e_uQ |
+action_result.data.\*.apt_description | string | | N/A |
+action_result.data.\*.created_at | string | | 2026-09-08T09:14:03Z |
+action_result.data.\*.description | string | | Observation: berbew "d70ea318...fc" [2026-09-08] |
+action_result.data.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/sightings/bHVysNDhUua_lrBmW6e_uQ |
+action_result.data.\*.id | string | `flashpoint sighting id` | bHVysNDhUua_lrBmW6e_uQ |
+action_result.data.\*.malware_description | string | | Tofsee is a modular spambot. |
+action_result.data.\*.mitre_attack_ids.\*.id | string | | T1041 |
+action_result.data.\*.mitre_attack_ids.\*.name | string | | Exfiltration Over C2 Channel |
+action_result.data.\*.mitre_attack_ids.\*.tactics.\* | string | | discovery |
+action_result.data.\*.modified_at | string | | 2026-09-08T09:14:03Z |
+action_result.data.\*.related_iocs.\*.apt_description | string | | N/A |
+action_result.data.\*.related_iocs.\*.created_at | string | | 2026-09-09T11:10:20.637000Z |
+action_result.data.\*.related_iocs.\*.entity_type | string | | indicator |
+action_result.data.\*.related_iocs.\*.external_references.\*.source_name | string | | Flashpoint |
+action_result.data.\*.related_iocs.\*.external_references.\*.url | string | | https://api.flashpoint.io/finished-intelligence/v1/reports/P_ZCCrviScaNDXu-P0ns4w |
+action_result.data.\*.related_iocs.\*.hashes.md5 | string | `md5` | |
+action_result.data.\*.related_iocs.\*.hashes.sha1 | string | `sha1` | 1d6cae992e93aa936cf1d5ba31e8a8842b66b636 |
+action_result.data.\*.related_iocs.\*.hashes.sha256 | string | `sha256` | d70ea318a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293afc00 |
+action_result.data.\*.related_iocs.\*.href | string | `url` | https://api.flashpoint.io/technical-intelligence/v2/indicators/6w6Dfq3mU6-EEChotntP |
+action_result.data.\*.related_iocs.\*.id | string | `flashpoint indicator id` | 6w6Dfq3mU6-EEChotntPzg |
+action_result.data.\*.related_iocs.\*.last_seen_at | string | | 2026-09-08T09:00:21Z |
+action_result.data.\*.related_iocs.\*.malware_description | string | | <p style="">"Mirai" is a botnet that originated in 2016. It targets Linux based operating systems with a focus on Internet of Things (IoT) devices, specifically IP cameras and home routers.</p>\<p styl |
+action_result.data.\*.related_iocs.\*.mitre_attack_ids.\*.id | string | | T1005 |
+action_result.data.\*.related_iocs.\*.mitre_attack_ids.\*.name | string | | Data from Local System |
+action_result.data.\*.related_iocs.\*.mitre_attack_ids.\*.tactics.\* | string | | Collection |
+action_result.data.\*.related_iocs.\*.modified_at | string | | 2026-09-09T11:18:13.171000Z |
+action_result.data.\*.related_iocs.\*.platform_urls.ignite | string | `url` | https://app.flashpoint.io/cti/malware/iocs/agRd2c-VX8iLTZekIARl_w |
+action_result.data.\*.related_iocs.\*.score.last_scored_at | string | | 2026-09-09T11:18:11.977888Z |
+action_result.data.\*.related_iocs.\*.score.raw_score | numeric | | 0 |
+action_result.data.\*.related_iocs.\*.score.value | string | | suspicious |
+action_result.data.\*.related_iocs.\*.sightings.\* | string | | |
+action_result.data.\*.related_iocs.\*.sort_date | string | | 2026-09-09T11:10:20.637000Z |
+action_result.data.\*.related_iocs.\*.total_sightings | numeric | | 0 |
+action_result.data.\*.related_iocs.\*.type | string | | file |
+action_result.data.\*.related_iocs.\*.value | string | `flashpoint ioc value` | d70ea318a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293afc00 |
+action_result.data.\*.sighted_at | string | | 2026-09-08T09:00:21Z |
+action_result.data.\*.source | string | | external_intelligence |
+action_result.data.\*.tags.\* | string | | file_type:exe |
+action_result.status | string | | success failed |
+action_result.message | string | | Successfully fetched the sighting |
+action_result.summary.source | string | | external_intelligence |
+action_result.summary.total_related_iocs | numeric | | 3 |
+summary.total_objects | numeric | | 1 |
+summary.total_objects_successful | numeric | | 1 |
+
+## action: 'list alerts'
+
+Fetch a list of alerts from the Flashpoint alert management API
+
+Type: **investigate** <br>
+Read only: **True**
+
+#### Action Parameters
+
+PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
+--------- | -------- | ----------- | ---- | --------
+**size** | optional | Maximum number of alerts to be fetched in one request (default: 25, maximum: 5000) | numeric | |
+**cursor** | optional | Continuation cursor returned by a previous run in 'action_result.summary.next_cursor' | string | |
+**status** | optional | Alert state to match. The endpoint accepts one state only | string | |
+**origin** | optional | Alert origin to match. The endpoint accepts one origin only | string | |
+**sources** | optional | Comma-separated list of alert sources to match (allowed values: communities, credentials, iocs, marketplaces, media, reports, vulnerabilities, data_exposure\_\_github, data_exposure\_\_gitlab, data_exposure\_\_bitbucket) | string | |
+**tags** | optional | Comma-separated list of exact alert tags to match | string | |
+**asset_type** | optional | Asset type that raised the alert | string | |
+**asset_ip** | optional | Asset IP that raised the alert | string | `ip` |
+**asset_ids** | optional | Comma-separated list of asset IDs whose alerts are fetched | string | |
+**query_ids** | optional | Comma-separated list of alert rule identifiers (UUIDs) that raised the alerts, as returned by GET /alert-management/v1/queries | string | |
+**created_after** | optional | Include alerts created on or after this date. Supports an absolute ISO-8601 UTC datetime (2024-01-01T00:00:00Z) or a 'now'-anchored relative value (now-7d) | string | |
+**created_before** | optional | Include alerts created before this date. Supports an absolute ISO-8601 UTC datetime (2024-01-01T00:00:00Z) or a 'now'-anchored relative value (now) | string | |
+
+#### Action Output
+
+DATA PATH | TYPE | CONTAINS | EXAMPLE VALUES
+--------- | ---- | -------- | --------------
+action_result.parameter.asset_ids | string | | 4fca0cd3-eec1-448e-8b35-6d45192168ed |
+action_result.parameter.asset_ip | string | `ip` | 198.51.100.24 |
+action_result.parameter.asset_type | string | | domain |
+action_result.parameter.created_after | string | | now-7d |
+action_result.parameter.created_before | string | | now |
+action_result.parameter.cursor | string | | 1788945290.101539 |
+action_result.parameter.origin | string | | searches |
+action_result.parameter.query_ids | string | | 3f2a9c14-5b7e-4f0a-9d21-8c6b0e5a7d43 |
+action_result.parameter.size | numeric | | 25 |
+action_result.parameter.sources | string | | communities |
+action_result.parameter.status | string | | sent |
+action_result.parameter.tags | string | | asset:example.com |
+action_result.data.\*.created_at | string | | 2024-06-03T20:16:14Z |
+action_result.data.\*.data_type | string | | chat |
+action_result.data.\*.generated_at | string | | 2024-06-03T20:16:12Z |
+action_result.data.\*.highlight_text | string | | Nah I need 6 figs to leak that |
+action_result.data.\*.highlights.body.\* | string | | <p class="c12"><span class="c21">Sparks are brief observations from the Flashpoint team about notable developments th... |
+action_result.data.\*.highlights.body.text/plain+urls.\* | string | `url` | https://patched.to/Thread-diamond-%E2%9A%A1-1500-<mark>stealer</mark>-logs-drop-%E2%80%A2-private-mixed-countries-%E2... |
+action_result.data.\*.highlights.body.text/plain.\* | string | | lane": "parity-mobile", "title": "fix(mobile): surface blank compo... |
+action_result.data.\*.highlights.container.name.\* | string | | <mark>ChatGPT</mark> Plus｜代充交流群 |
+action_result.data.\*.highlights.media_v2.image_enrichment.enrichments.v1.image-analysis.text.value.\* | string | | Lakota Man @LakotaMan1 Follow 0 Top 10 Spreaders of <mark>Disinformation</mark> in the US accordi... |
+action_result.data.\*.highlights.section.\* | string | | <mark>MALWARE</mark>: вредоносы, крипт, <mark>инжекты</mark>, 0/1day экспы |
+action_result.data.\*.highlights.site_actor.names.aliases.\* | string | | WORK VERIFIKASI <mark>BYPASS</mark> |
+action_result.data.\*.highlights.summary.\* | string | | Notable posts in Flashpoint collections. |
+action_result.data.\*.highlights.title.\* | string | | <mark>chatGPT</mark>-ai-shortcuts-01.md |
+action_result.data.\*.id | string | | 8a45bd35-1fac-4b35-aa27-630ab3821507 |
+action_result.data.\*.is_read | boolean | | True False |
+action_result.data.\*.parent_data_type | string | | board |
+action_result.data.\*.reason.details.params.digests.daily | boolean | | False |
+action_result.data.\*.reason.details.params.digests.weekly | boolean | | False |
+action_result.data.\*.reason.details.params.frequency | string | | email:daily digest |
+action_result.data.\*.reason.details.params.params.exploit.\* | string | | exploit_in_wild |
+action_result.data.\*.reason.details.params.params.query | string | | |
+action_result.data.\*.reason.details.params.params.severity.\* | string | | high |
+action_result.data.\*.reason.details.params.tags_cond.\* | string | | OR |
+action_result.data.\*.reason.details.sources.\* | string | | communities |
+action_result.data.\*.reason.entity | string | | |
+action_result.data.\*.reason.id | string | | 218f7b12-8c85-474e-8013-98d014e99c8c |
+action_result.data.\*.reason.name | string | | Insider Threat Alerts |
+action_result.data.\*.reason.origin | string | | two-face |
+action_result.data.\*.reason.text | string | | ("i work at" OR "i am employed") |
+action_result.data.\*.resource.actors.\* | string | | BLACKNET-00 Ransomware |
+action_result.data.\*.resource.author | string | | |
+action_result.data.\*.resource.authors | string | | |
+action_result.data.\*.resource.basetypes.\* | string | | paste |
+action_result.data.\*.resource.container.container.name | string | | BASI |
+action_result.data.\*.resource.container.container.native_id | string | | 104 |
+action_result.data.\*.resource.container.container.title | string | | A.I |
+action_result.data.\*.resource.container.name | string | | skidbase |
+action_result.data.\*.resource.container.native_id | string | | 194772 |
+action_result.data.\*.resource.container.server | string | | |
+action_result.data.\*.resource.container.title | string | | gen |
+action_result.data.\*.resource.country | string | | |
+action_result.data.\*.resource.created_at.date-time | string | | 2026-09-09T12:42:28+00:00 |
+action_result.data.\*.resource.created_at.timestamp | numeric | | 1717445707 |
+action_result.data.\*.resource.description | string | | |
+action_result.data.\*.resource.id | string | | LIjNc-xrVUynzUwsoqPfVw |
+action_result.data.\*.resource.ignite_search_url | string | `url` | https://app.flashpoint.io/vuln/search/vulns?updated_after=2026-09-08T11:58:07Z&updated_before=2026-09-09T12:00:07Z&se... |
+action_result.data.\*.resource.link | string | | |
+action_result.data.\*.resource.media_v2.\*.image_enrichment.enrichments.v1.image-analysis.safe_search.adult | numeric | | 1 |
+action_result.data.\*.resource.media_v2.\*.image_enrichment.enrichments.v1.image-analysis.safe_search.medical | numeric | | 1 |
+action_result.data.\*.resource.media_v2.\*.image_enrichment.enrichments.v1.image-analysis.safe_search.racy | numeric | | 1 |
+action_result.data.\*.resource.media_v2.\*.image_enrichment.enrichments.v1.image-analysis.safe_search.spoof | numeric | | 5 |
+action_result.data.\*.resource.media_v2.\*.image_enrichment.enrichments.v1.image-analysis.safe_search.violence | numeric | | 2 |
+action_result.data.\*.resource.media_v2.\*.media_type | string | | image |
+action_result.data.\*.resource.media_v2.\*.mime_type | string | | image/png |
+action_result.data.\*.resource.media_v2.\*.phash | string | | dabea543a45aa15c |
+action_result.data.\*.resource.media_v2.\*.phash256 | string | | dabb9e84a5b443e5a4b44a5aa1625c0acc45b52bad1dad56594aa365b4adbc9d |
+action_result.data.\*.resource.media_v2.\*.sha1 | string | `sha1` | ba528c1c321cc77072c50b3037ceff7686193f58 |
+action_result.data.\*.resource.media_v2.\*.storage_uri | string | | gs://kraken-datalake-media/artifacts/80/80b00609c844337505050bffeb80d36207d390d86670eb521001000617a31db0 |
+action_result.data.\*.resource.media_v2.image_enrichment.enrichments.v1.image-analysis.safe_search.adult | numeric | | 1 |
+action_result.data.\*.resource.media_v2.image_enrichment.enrichments.v1.image-analysis.safe_search.medical | numeric | | 2 |
+action_result.data.\*.resource.media_v2.image_enrichment.enrichments.v1.image-analysis.safe_search.racy | numeric | | 2 |
+action_result.data.\*.resource.media_v2.image_enrichment.enrichments.v1.image-analysis.safe_search.spoof | numeric | | 2 |
+action_result.data.\*.resource.media_v2.image_enrichment.enrichments.v1.image-analysis.safe_search.violence | numeric | | 2 |
+action_result.data.\*.resource.media_v2.media_type | string | | image |
+action_result.data.\*.resource.media_v2.mime_type | string | | image/png |
+action_result.data.\*.resource.media_v2.phash | string | | f1a5a5b12d785a52 |
+action_result.data.\*.resource.media_v2.phash256 | string | | f140a540a540b1402d4b780e5ab152bf42bf5abf5abf5abf42a74abf3e3e4780 |
+action_result.data.\*.resource.media_v2.sha1 | string | `sha1` | 1212a5675cbe86e60cd95ae50c93360e9988decf |
+action_result.data.\*.resource.media_v2.storage_uri | string | | gs://kraken-datalake-media/artifacts/f6/f65f4a8b73c8573aea6ff2dfc8d0e25004b0752537d777257a56d9489bae9b2e |
+action_result.data.\*.resource.native_url | string | `url` | https://darknetarmy.st/threads/%F0%9F%93%9Bjailbreak-bypass-chatgpt-rules-working-latest-method-11-4-jenxkaito%F0%9F%... |
+action_result.data.\*.resource.parent_basetypes.\* | string | | conversation |
+action_result.data.\*.resource.parent_fpid | string | | nFV247utUQuPZ-Je7qOcmQ |
+action_result.data.\*.resource.section | string | | A.I |
+action_result.data.\*.resource.site.title | string | | Telegram |
+action_result.data.\*.resource.site_actor.names.handle | string | | RISK |
+action_result.data.\*.resource.site_actor.native_id | string | | example_actor_01 |
+action_result.data.\*.resource.sort_date | string | | 2026-09-09T12:42:28Z |
+action_result.data.\*.resource.summary | string | | Notable posts in Flashpoint collections. |
+action_result.data.\*.resource.tags.\* | string | | Supply chain and third parties |
+action_result.data.\*.resource.title | string | | BIGFATCHAT |
+action_result.data.\*.resource.version_posted_at | string | | 2026-09-09T02:37:05.114000Z |
+action_result.data.\*.resource.vulns.\*.cvss_v3 | numeric | | 5.3 |
+action_result.data.\*.resource.vulns.\*.description | string | | Dell Secure Connect Gateway contains a flaw that allows a cross-site scripting (XSS) attack. This flaw exists because... |
+action_result.data.\*.resource.vulns.\*.epss | numeric | | 0.00186 |
+action_result.data.\*.resource.vulns.\*.ignite_url | string | `url` | https://app.flashpoint.io/vuln/vulnerabilities/473054 |
+action_result.data.\*.resource.vulns.\*.location | string | | Remote / Network Access |
+action_result.data.\*.resource.vulns.\*.published_at | string | | 2026-09-09T11:47:49Z |
+action_result.data.\*.resource.vulns.\*.solution | string | | It has been reported that this has been fixed. Please refer to the product listing for upgraded versions that address... |
+action_result.data.\*.resource.vulns.\*.title | string | | Dell Secure Connect Gateway Unspecified XSS (2026-79946) |
+action_result.data.\*.resource.vulns.\*.vuln_id | string | | 473054 |
+action_result.data.\*.source | string | | communities |
+action_result.data.\*.status | string | | In Progress |
+action_result.data.\*.tags | string | | |
+action_result.status | string | | success failed |
+action_result.message | string | | Total alerts: 100 |
+action_result.summary.next_cursor | string | | 1788945290.101539 |
+action_result.summary.total_alerts | numeric | | 100 |
+summary.total_objects | numeric | | 1 |
+summary.total_objects_successful | numeric | | 1 |
+
+## action: 'on poll'
+
+Ingest Flashpoint alerts or compromised credentials into SOAR containers and artifacts
+
+Type: **ingest** <br>
+Read only: **True**
+
+The data source is selected by the 'Ingestion Type' asset configuration. Splunk SOAR permits one ingestion action per app, so ingesting both alerts and compromised credentials requires two asset configurations. A scheduled poll resumes from the saved checkpoint and writes a new one; POLL NOW honours the container count passed in by the platform and leaves the checkpoint untouched.
+
+#### Action Parameters
+
+PARAMETER | REQUIRED | DESCRIPTION | TYPE | CONTAINS
+--------- | -------- | ----------- | ---- | --------
+**container_id** | optional | Container IDs to limit the ingestion to | string | |
+**start_time** | optional | Start of time range, in epoch time (milliseconds) | numeric | |
+**end_time** | optional | End of time range, in epoch time (milliseconds) | numeric | |
+**container_count** | optional | Maximum number of container records to query for | numeric | |
+**artifact_count** | optional | Maximum number of artifact records to query for | numeric | |
+
+#### Action Output
+
+No Output
 
 ______________________________________________________________________
 

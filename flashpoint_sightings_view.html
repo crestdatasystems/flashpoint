@@ -10,7 +10,7 @@
 {% block custom_tools %}{% endblock %}
 {% block widget_content %}
   <!-- Main Start Block -->
-  <!-- File: flashpoint_reports_view.html
+  <!-- File: flashpoint_sightings_view.html
     Copyright (c) Flashpoint, 2020-2026
 
     This unpublished material is proprietary to Flashpoint.
@@ -121,37 +121,53 @@
         <h4 class="wf-h4-style">No data found</h4>
       {% else %}
         <div class="results">
-          <h4 class="wf-h4-style">Reports Information</h4>
+          <h4 class="wf-h4-style">Sightings Information</h4>
           <!--Default View-->
           <table class="wf-table-horizontal datatable">
             <thead>
               <tr>
-                <th>Report ID</th>
-                <th>Report Title</th>
-                <th>Report Tags</th>
-                <th>Report Platform URL</th>
+                <th>Sighting ID</th>
+                <th>Description</th>
+                <th>Source</th>
+                <th>Sighted At</th>
+                <th>Tags</th>
+                <th>MITRE ATT&amp;CK</th>
+                <th>Related IoCs</th>
+                <th>Link</th>
               </tr>
             </thead>
             <tbody>
-              {% for report in result.data %}
+              {% for sighting in result.data %}
                 <tr>
                   <td>
                     <a class="no-word-wrap"
                        href="javascript:;"
-                       onclick="context_menu(this, [{'contains': ['fp report id'], 'value':'{{ report.id|escapejs }}' }], 0, {{ container.id }}, null, false);">
-                      {{ report.id }}
+                       onclick="context_menu(this, [{'contains': ['flashpoint sighting id'], 'value':'{{ sighting.id|escapejs }}' }], 0, {{ container.id }}, null, false);">
+                      {{ sighting.id }}
                       &nbsp;
                       <span class="fa fa-caret-down" style="font-size: smaller;"></span>
                     </a>
                   </td>
-                  <td>{{ report.title }}</td>
+                  <td>{{ sighting.description }}</td>
+                  <td>{{ sighting.source }}</td>
+                  <td class="no-word-wrap">{{ sighting.sighted_at }}</td>
                   <td>
                     <ul>
-                      {% for tag in report.tags %}<li>{{ tag }}</li>{% endfor %}
+                      {% for tag in sighting.tags %}<li>{{ tag }}</li>{% endfor %}
                     </ul>
                   </td>
                   <td>
-                    <a href="{{ report.platform_url }}" target="_blank">{{ report.platform_url }}</a>
+                    <ul>
+                      {% for technique in sighting.mitre_attack_ids %}<li>{{ technique.id }} - {{ technique.name }}</li>{% endfor %}
+                    </ul>
+                  </td>
+                  <td>
+                    <ul>
+                      {% for ioc in sighting.related_iocs %}<li>{{ ioc.value }} ({{ ioc.type }})</li>{% endfor %}
+                    </ul>
+                  </td>
+                  <td>
+                    <a href="{{ sighting.href }}" target="_blank">{{ sighting.href }}</a>
                   </td>
                 </tr>
               {% endfor %}

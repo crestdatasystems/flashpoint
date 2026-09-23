@@ -10,7 +10,7 @@
 {% block custom_tools %}{% endblock %}
 {% block widget_content %}
   <!-- Main Start Block -->
-  <!-- File: flashpoint_reports_view.html
+  <!-- File: flashpoint_alerts_view.html
     Copyright (c) Flashpoint, 2020-2026
 
     This unpublished material is proprietary to Flashpoint.
@@ -90,21 +90,6 @@
         white-space:nowrap;
     }
 
-  .fp td ul {
-    margin: 0;
-    padding-left: 1.2em;
-    list-style-position: outside;
-    min-width: 14em;
-  }
-
-  .fp td ul ul {
-    padding-left: 1em;
-  }
-
-  .fp td li {
-    overflow-wrap: anywhere;
-  }
-
   </style>
   <div class="fp"
        style="overflow: auto;
@@ -121,38 +106,48 @@
         <h4 class="wf-h4-style">No data found</h4>
       {% else %}
         <div class="results">
-          <h4 class="wf-h4-style">Reports Information</h4>
+          <h4 class="wf-h4-style">Alerts Information</h4>
           <!--Default View-->
           <table class="wf-table-horizontal datatable">
             <thead>
               <tr>
-                <th>Report ID</th>
-                <th>Report Title</th>
-                <th>Report Tags</th>
-                <th>Report Platform URL</th>
+                <th>Alert ID</th>
+                <th>Reason</th>
+                <th>Source</th>
+                <th>Data Type</th>
+                <th>Status</th>
+                <th>Generated At</th>
+                <th>Resource</th>
+                <th>Site</th>
+                <th>Actor</th>
+                <th>Highlight</th>
               </tr>
             </thead>
             <tbody>
-              {% for report in result.data %}
+              {% for alert in result.data %}
                 <tr>
+                  <td class="no-word-wrap">{{ alert.id }}</td>
+                  <td>{{ alert.reason.name }}</td>
+                  <td>{{ alert.source|default_if_none:"" }}</td>
+                  <td>{{ alert.data_type|default_if_none:"" }}</td>
+                  <td>{{ alert.status|default_if_none:"" }}</td>
+                  <td class="no-word-wrap">{{ alert.generated_at|default_if_none:"" }}</td>
                   <td>
-                    <a class="no-word-wrap"
-                       href="javascript:;"
-                       onclick="context_menu(this, [{'contains': ['fp report id'], 'value':'{{ report.id|escapejs }}' }], 0, {{ container.id }}, null, false);">
-                      {{ report.id }}
-                      &nbsp;
-                      <span class="fa fa-caret-down" style="font-size: smaller;"></span>
-                    </a>
+                    {% comment %}
+                      Mirrors the connector's CEF chain: native_url -> link -> ignite_search_url.
+                      Digest alerts (vulnerability roll-ups) carry a URL but no resource title, so
+                      the title alone cannot be the anchor text or the link renders zero-width.
+                    {% endcomment %}
+                    {% firstof alert.resource.native_url alert.resource.link alert.resource.ignite_search_url as resource_url %}
+                    {% if resource_url %}
+                      <a href="{{ resource_url }}" target="_blank">{% firstof alert.resource.title "View resource" %}</a>
+                    {% else %}
+                      {{ alert.resource.title }}
+                    {% endif %}
                   </td>
-                  <td>{{ report.title }}</td>
-                  <td>
-                    <ul>
-                      {% for tag in report.tags %}<li>{{ tag }}</li>{% endfor %}
-                    </ul>
-                  </td>
-                  <td>
-                    <a href="{{ report.platform_url }}" target="_blank">{{ report.platform_url }}</a>
-                  </td>
+                  <td>{{ alert.resource.site.title }}</td>
+                  <td>{{ alert.resource.site_actor.names.handle }}</td>
+                  <td>{{ alert.highlight_text }}</td>
                 </tr>
               {% endfor %}
             </tbody>
