@@ -1343,7 +1343,7 @@ class FlashpointConnector(BaseConnector):
         skip = 0
 
         # Define per page limit
-        page_limit = FLASHPOINT_PER_PAGE_DEFAULT_LIMIT
+        page_limit = FLASHPOINT_REPORTS_DEFAULT_LIMIT
 
         if limit and limit <= page_limit:
             page_limit = limit
@@ -1453,7 +1453,7 @@ class FlashpointConnector(BaseConnector):
         action_result = self.add_action_result(ActionResult(dict(param)))
 
         # Fetch action parameters
-        limit = param.get("limit", FLASHPOINT_PER_PAGE_DEFAULT_LIMIT)
+        limit = param.get("limit", FLASHPOINT_REPORTS_DEFAULT_LIMIT)
 
         # Fetch reports data
         ret_val = self._fetch_reports(action_result, FLASHPOINT_LIST_REPORTS_ENDPOINT, limit)
@@ -1483,7 +1483,7 @@ class FlashpointConnector(BaseConnector):
         if phantom.is_fail(ret_val):
             return action_result.get_status()
 
-        limit = param.get("limit", FLASHPOINT_PER_PAGE_DEFAULT_LIMIT)
+        limit = param.get("limit", FLASHPOINT_REPORTS_DEFAULT_LIMIT)
 
         # Fetch reports
         ret_val = self._fetch_reports(action_result, FLASHPOINT_LIST_RELATED_REPORTS_ENDPOINT.format(report_id=report_id), limit)

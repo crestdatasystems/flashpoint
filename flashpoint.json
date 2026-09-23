@@ -167,9 +167,9 @@
             "read_only": true,
             "parameters": {
                 "limit": {
-                    "description": "Maximum number of reports to be fetched (default: 500)",
+                    "description": "Maximum number of reports to be fetched (default: 50)",
                     "data_type": "numeric",
-                    "default": 500,
+                    "default": 50,
                     "order": 0
                 }
             },
@@ -252,7 +252,7 @@
                     "data_path": "action_result.data.*.platform_url",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/intelligence/reports/report/KtHHUswTTSG1IjhreK3ipg#detail"
+                        "https://app.flashpoint.io/cti/intelligence/report/fBPmyqAB7dvfmFc-DQM-"
                     ],
                     "contains": [
                         "url"
@@ -276,7 +276,7 @@
                     "data_path": "action_result.data.*.sources.*.original",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/ddw/chats/channels/Pg2nv9-CUGm7OQwsvyRIiQ?id=1581881510&fpid=Rk4a-CEeW4Ku4zssexy_kg&limit=&skip=#detail"
+                        "https://app.flashpoint.io/search/context/communities/OuWVBsllW-CEg8rTqmW7AQ"
                     ],
                     "contains": [
                         "url"
@@ -304,7 +304,7 @@
                     "data_path": "action_result.data.*.sources.*.title",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/ddw/chats/channels/Pg2nv9-CUGm7OQwsvyRIiQ?id=1581881510&fpid=Rk4a-CEeW4Ku4zssexy_kg&limit=&skip=#detail"
+                        "https://app.flashpoint.io/search/context/communities/OuWVBsllW-CEg8rTqmW7AQ"
                     ],
                     "contains": [
                         "url"
@@ -498,7 +498,7 @@
                     "data_path": "action_result.data.*.platform_url",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/intelligence/reports/report/6a_iIe1CQK2-Rjb_wRcKuw#detail"
+                        "https://app.flashpoint.io/cti/intelligence/report/fBPmyqAB7dvfmFc-DQM-"
                     ],
                     "contains": [
                         "url"
@@ -522,7 +522,7 @@
                     "data_path": "action_result.data.*.sources.*.original",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/technical_data/cves/items/IPFW6CIyXzSsPpo4UxBhKw"
+                        "https://app.flashpoint.io/vuln/vulnerabilities/476920"
                     ],
                     "contains": [
                         "url"
@@ -550,7 +550,7 @@
                     "data_path": "action_result.data.*.sources.*.title",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/technical_data/cves/items/IPFW6CIyXzSsPpo4UxBhKw"
+                        "https://app.flashpoint.io/vuln/vulnerabilities/476920"
                     ],
                     "contains": [
                         "url"
@@ -687,9 +687,9 @@
                     ]
                 },
                 "limit": {
-                    "description": "Maximum number of reports to be fetched (default: 500)",
+                    "description": "Maximum number of reports to be fetched (default: 50)",
                     "data_type": "numeric",
-                    "default": 500,
+                    "default": 50,
                     "order": 1
                 }
             },
@@ -768,7 +768,7 @@
                     "data_path": "action_result.data.*.platform_url",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/intelligence/reports/report/2EtSXz6HRX23Bb4ZvrFoHA#detail"
+                        "https://app.flashpoint.io/cti/intelligence/report/fBPmyqAB7dvfmFc-DQM-"
                     ],
                     "contains": [
                         "url"
@@ -792,7 +792,7 @@
                     "data_path": "action_result.data.*.sources.*.original",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/technical_data/cves/items/W69B9eS4WUK8sGcGi0m8AA"
+                        "https://app.flashpoint.io/vuln/vulnerabilities/476920"
                     ],
                     "contains": [
                         "url"
@@ -820,7 +820,7 @@
                     "data_path": "action_result.data.*.sources.*.title",
                     "data_type": "string",
                     "example_values": [
-                        "https://fp.tools/home/technical_data/cves/items/W69B9eS4WUK8sGcGi0m8AA"
+                        "https://app.flashpoint.io/vuln/vulnerabilities/476920"
                     ],
                     "contains": [
                         "url"
@@ -955,7 +955,7 @@
                     "order": 0
                 },
                 "limit": {
-                    "description": "Maximum number of reports to be fetched (default: 500)",
+                    "description": "Maximum number of compromised credentials to be fetched (default: 500)",
                     "data_type": "numeric",
                     "default": 500,
                     "order": 1
@@ -1633,7 +1633,7 @@
                     ]
                 },
                 "limit": {
-                    "description": "Maximum number of reports to be fetched (default: 500)",
+                    "description": "Maximum number of search results to be fetched (default: 500)",
                     "data_type": "numeric",
                     "default": 500,
                     "order": 1

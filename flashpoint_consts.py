@@ -31,6 +31,10 @@ FLASHPOINT_GET_REPORT_ENDPOINT = "/finished-intelligence/v1/reports/{report_id}"
 FLASHPOINT_LIST_RELATED_REPORTS_ENDPOINT = "/finished-intelligence/v1/reports/{report_id}/related"
 
 FLASHPOINT_PER_PAGE_DEFAULT_LIMIT = 500
+# Finished Intelligence reports carry their full HTML body, often with embedded images, so a page of
+# them is far larger than a page of any other record. 500 of the newest reports exceed the size
+# Splunk SOAR can store for one action result, so the report actions default to, and page by, 50
+FLASHPOINT_REPORTS_DEFAULT_LIMIT = 50
 FLASHPOINT_DEFAULT_WAIT_TIMEOUT_PERIOD = 5
 FLASHPOINT_NUMBER_OF_RETRIES = 1
 FLASHPOINT_SESSION_TIMEOUT = 2

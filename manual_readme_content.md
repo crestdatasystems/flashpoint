@@ -113,18 +113,18 @@ app, so ingesting both alerts and compromised credentials requires **two asset c
 
 ## Steps to generate API Token
 
-1. Go to [Flashpoint](https://fp.tools/) .
-1. Select **APIs & Integrations** from the left side panel.
-1. Under the **FLASHPOINT API** section, select **Manage API Tokens** .
-1. Click on the **GENERATE TOKEN** .
-1. Enter a **Token Label** and your current FPTools credentials in the **Username** and
-   **Password** fields in the appeared **Generate API Token** prompt.
-1. Click on the **GENERATE** button.
-1. This will generate a new API token and will display it in the **GENERATE API TOKEN** section on
-   the page.
+1. Go to [Flashpoint](https://app.flashpoint.io/) and sign in to your Ignite account.
+1. Click on your **profile icon** in the top right corner and select **Manage API Tokens** from the
+   dropdown. (Alternatively, go directly to <https://app.flashpoint.io/tokens>.)
+1. On the **Manage API Tokens** page, click the **Generate New Token** button.
+1. Enter a **name** for the API token in the **Generate API Token** prompt.
+1. Click the **Generate Token** button.
+1. Click **Copy Token to Clipboard** and paste the token into your integration, code, or API call.
+1. Click **Save & Close** to save the generated token and close the token generation page.
 
-**Note-** Save your generated API token somewhere secure, as you will no longer be able to
-retrieve this key after leaving this page.
+**Note-** The token name must be 1 to 64 characters long and can only contain letters, numbers,
+underscores, hyphens, and periods. Save your generated API token somewhere secure, as you will no
+longer be able to retrieve this key after leaving this page.
 
 ## Explanation of Flashpoint Actions' Parameters
 
@@ -445,11 +445,14 @@ retrieve this key after leaving this page.
    - **<u>Action Parameter</u> ​ - Limit**
 
      - This is an optional parameter. It is used to limit the number of fetched intelligence
-       reports. The default value is 500. If the limit is not provided, it will fetch by
-       default 500 intelligence reports.
+       reports. The default value is 50. Reports are fetched 50 per API call, so a larger limit is
+       collected over several calls.
 
-     **<u>Note</u> -** Based on the current API analysis, the endpoint for this action fetches a
-     huge set of data. Hence, the action run might take more time for a larger limit value.
+     **<u>Note</u> -** Every report carries its full HTML body, often with embedded images, so a
+     single report can be several MB. Splunk SOAR cannot store an action result larger than about
+     256 MB, which a limit in the hundreds can exceed; the action then fails with a
+     `total size of jsonb array elements exceeds the maximum` error. Keep the limit at or near
+     the default, and use [get report] for the full detail of a single report.
 1. ### Get Report
    - **<u>Action Parameter</u> ​ - Report ID**
      - This is a required parameter. It is a Flashpoint intelligence report ID.
@@ -461,18 +464,18 @@ retrieve this key after leaving this page.
 
      - This is a required parameter. It is a Flashpoint intelligence report ID.
      - **Examples:**
-       - Fetch default 500 related intelligence reports for the provided report ID
+       - Fetch the default 50 related intelligence reports for the provided report ID
          - Report ID = wrh9BCZETzu3AO3CUopOlw
          - Limit = Keep it empty
 
    - **<u>Action Parameter</u> ​ - Limit**
 
      - This is an optional parameter. It is used to limit the number of fetched intelligence
-       reports. The default value is 500. If the limit is not provided, it will fetch by
-       default 500 intelligence reports.
+       reports. The default value is 50. Reports are fetched 50 per API call, so a larger limit is
+       collected over several calls.
 
-     **<u>Note</u> -** Based on the current API analysis, the endpoint for this action fetches a
-     huge set of data. Hence, the action run might take more time for a larger limit value.
+     **<u>Note</u> -** The same result-size limit as [list reports] applies: keep the limit at or
+     near the default.
 1. ### Get Compromised Credentials
    - **<u>Action Parameter</u> ​ - Filter**
 
