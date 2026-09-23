@@ -1558,9 +1558,9 @@ action_result.data.\*.highlight_text | string | | Nah I need 6 figs to leak that
 action_result.data.\*.highlights.body.\* | string | | <p class="c12"><span class="c21">Sparks are brief observations from the Flashpoint team about notable developments th... |
 action_result.data.\*.highlights.body.text/plain+urls.\* | string | `url` | https://patched.to/Thread-diamond-%E2%9A%A1-1500-<mark>stealer</mark>-logs-drop-%E2%80%A2-private-mixed-countries-%E2... |
 action_result.data.\*.highlights.body.text/plain.\* | string | | lane": "parity-mobile", "title": "fix(mobile): surface blank compo... |
-action_result.data.\*.highlights.container.name.\* | string | | <mark>ChatGPT</mark> Plus｜代充交流群 |
+action_result.data.\*.highlights.container.name.\* | string | | <mark>ChatGPT</mark> Plus | Top-up exchange group |
 action_result.data.\*.highlights.media_v2.image_enrichment.enrichments.v1.image-analysis.text.value.\* | string | | Lakota Man @LakotaMan1 Follow 0 Top 10 Spreaders of <mark>Disinformation</mark> in the US accordi... |
-action_result.data.\*.highlights.section.\* | string | | <mark>MALWARE</mark>: вредоносы, крипт, <mark>инжекты</mark>, 0/1day экспы |
+action_result.data.\*.highlights.section.\* | string | | <mark>MALWARE</mark>: malware, crypt, <mark>injects</mark>, 0/1day exploits |
 action_result.data.\*.highlights.site_actor.names.aliases.\* | string | | WORK VERIFIKASI <mark>BYPASS</mark> |
 action_result.data.\*.highlights.summary.\* | string | | Notable posts in Flashpoint collections. |
 action_result.data.\*.highlights.title.\* | string | | <mark>chatGPT</mark>-ai-shortcuts-01.md |

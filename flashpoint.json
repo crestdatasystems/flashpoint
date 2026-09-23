@@ -5621,7 +5621,7 @@
                     "data_path": "action_result.data.*.highlights.container.name.*",
                     "data_type": "string",
                     "example_values": [
-                        "<mark>ChatGPT</mark> Plus｜代充交流群"
+                        "<mark>ChatGPT</mark> Plus | Top-up exchange group"
                     ]
                 },
                 {
@@ -5635,7 +5635,7 @@
                     "data_path": "action_result.data.*.highlights.section.*",
                     "data_type": "string",
                     "example_values": [
-                        "<mark>MALWARE</mark>: вредоносы, крипт, <mark>инжекты</mark>, 0/1day экспы"
+                        "<mark>MALWARE</mark>: malware, crypt, <mark>injects</mark>, 0/1day exploits"
                     ]
                 },
                 {
