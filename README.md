@@ -1,10 +1,10 @@
 # Flashpoint
 
 Publisher: Flashpoint <br>
-Connector Version: 4.0.0 <br>
+Connector Version: 3.0.3 <br>
 Product Vendor: Flashpoint <br>
 Product Name: Flashpoint <br>
-Minimum Product Version: 6.2.1
+Minimum Product Version: 6.3.0
 
 This app implements the investigative actions for the Flashpoint on the Phantom Platform
 
